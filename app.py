@@ -146,26 +146,33 @@ with aba_dashboard:
                 fig_resp = px.bar(resp_counts, x='Porcentagem', y='Resp', orientation='h', text=resp_counts['Porcentagem'].apply(lambda x: f'{x:.1f}%'), color='Porcentagem', color_continuous_scale='Blues')
                 st.plotly_chart(fig_resp, use_container_width=True)
 
-        # --- MTBF, MTTR E JACK-KNIFE POR EQUIPAMENTO ---
+        # --- MTBF, MTTR E JACK-KNIFE DINÂMICO ---
         st.markdown("---")
-        st.markdown("### 🚜 Análise por Equipamento e Jack-Knife")
+        st.markdown("### 🚜 Análise Dinâmica: MTBF, MTTR e Jack-Knife")
+        dimensao = st.radio("Selecione a Dimensão de Análise:", ["EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
         
-        if not corretivas.empty:
-            equip_stats = corretivas.groupby('EQUIPAMENTO').agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
-            equip_stats['MTTR'] = equip_stats['Downtime'] / equip_stats['Falhas']
-            equip_stats['MTBF'] = ((dias_operacao * 24) - equip_stats['Downtime']) / equip_stats['Falhas']
-            equip_stats['MTBF'] = equip_stats['MTBF'].apply(lambda x: x if x > 0 else 0)
+        if not corretivas.empty and dimensao in corretivas.columns:
+            dim_stats = corretivas.groupby(dimensao).agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
+            
+            # Conta equipamentos únicos para calcular as horas corretamente para Grupos e Subgrupos
+            equip_count = df_filtered.groupby(dimensao)['EQUIPAMENTO'].nunique().reset_index(name='Qtd_Equip')
+            dim_stats = pd.merge(dim_stats, equip_count, on=dimensao)
+            
+            dim_stats['MTTR'] = dim_stats['Downtime'] / dim_stats['Falhas']
+            dim_stats['Horas Disponiveis'] = dias_operacao * 24 * dim_stats['Qtd_Equip']
+            dim_stats['MTBF'] = (dim_stats['Horas Disponiveis'] - dim_stats['Downtime']) / dim_stats['Falhas']
+            dim_stats['MTBF'] = dim_stats['MTBF'].apply(lambda x: x if x > 0 else 0)
 
-            tab_eq1, tab_eq2, tab_eq3 = st.tabs(["Jack-Knife", "MTBF", "MTTR"])
+            tab_eq1, tab_eq2, tab_eq3 = st.tabs([f"Jack-Knife por {dimensao.title()}", f"MTBF por {dimensao.title()}", f"MTTR por {dimensao.title()}"])
             
             with tab_eq1:
-                mean_falhas = equip_stats['Falhas'].mean()
-                mean_mttr = equip_stats['MTTR'].mean()
-                max_f = equip_stats['Falhas'].max() * 1.1 if not equip_stats.empty else 1
-                max_m = equip_stats['MTTR'].max() * 1.1 if not equip_stats.empty else 1
+                mean_falhas = dim_stats['Falhas'].mean()
+                mean_mttr = dim_stats['MTTR'].mean()
+                max_f = dim_stats['Falhas'].max() * 1.1 if not dim_stats.empty else 1
+                max_m = dim_stats['MTTR'].max() * 1.1 if not dim_stats.empty else 1
                 
-                fig_jk = px.scatter(equip_stats, x='Falhas', y='MTTR', text='EQUIPAMENTO', size='Downtime',
-                                    title='Jack-Knife (Tamanho da bolha = Horas Paradas)', labels={'Falhas': 'Número de Falhas', 'MTTR': 'MTTR (Horas)'})
+                fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', text=dimensao, size='Downtime',
+                                    title=f'Jack-Knife ({dimensao.title()})', labels={'Falhas': 'Número de Falhas', 'MTTR': 'MTTR (Horas)'})
                 
                 fig_jk.add_shape(type="rect", x0=0, y0=0, x1=mean_falhas, y1=mean_mttr, fillcolor="lightgreen", opacity=0.2, layer="below", line_width=0)
                 fig_jk.add_shape(type="rect", x0=mean_falhas, y0=0, x1=max_f, y1=mean_mttr, fillcolor="yellow", opacity=0.2, layer="below", line_width=0)
@@ -187,12 +194,12 @@ with aba_dashboard:
                 """)
 
             with tab_eq2:
-                fig_mtbf = px.bar(equip_stats.sort_values('MTBF', ascending=False), x='EQUIPAMENTO', y='MTBF', text=equip_stats['MTBF'].round(1), title="MTBF por Equipamento")
+                fig_mtbf = px.bar(dim_stats.sort_values('MTBF', ascending=False), x=dimensao, y='MTBF', text=dim_stats['MTBF'].round(1), title=f"MTBF por {dimensao.title()}")
                 fig_mtbf.update_traces(textposition='outside')
                 st.plotly_chart(fig_mtbf, use_container_width=True)
                 
             with tab_eq3:
-                fig_mttr = px.bar(equip_stats.sort_values('MTTR', ascending=False), x='EQUIPAMENTO', y='MTTR', text=equip_stats['MTTR'].round(1), color_discrete_sequence=['indianred'], title="MTTR por Equipamento")
+                fig_mttr = px.bar(dim_stats.sort_values('MTTR', ascending=False), x=dimensao, y='MTTR', text=dim_stats['MTTR'].round(1), color_discrete_sequence=['indianred'], title=f"MTTR por {dimensao.title()}")
                 fig_mttr.update_traces(textposition='outside')
                 st.plotly_chart(fig_mttr, use_container_width=True)
 
@@ -229,7 +236,7 @@ with aba_dashboard:
             tbf_clean = tbf_clean[tbf_clean > 0].values
 
             if len(tbf_clean) > 3:
-                # Ajuste Exclusivo com Distribuição de Weibull (scipy.stats.weibull_min)
+                # Ajuste Exclusivo com Distribuição de Weibull
                 shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
                 beta = shape
                 eta = scale
@@ -283,7 +290,6 @@ with aba_plano_acao:
     st.header("📋 Plano de Ação 5W2H (Google Sheets)")
     
     url_planilha = "https://docs.google.com/spreadsheets/d/1mrfp_qDdX5_6sJVT5-Gk3NzM3nKqznmlR6rwDsXZN2s/edit?gid=0#gid=0"
-    
     conn = st.connection("gsheets", type=GSheetsConnection)
     
     colunas_5w2h = [
@@ -292,31 +298,31 @@ with aba_plano_acao:
         "How? (Como)", "How Much? (Custo Estimado)", "Status"
     ]
 
+    # Correção: Ignora o erro se a planilha estiver completamente vazia (No columns to parse)
     try:
         df_acao = conn.read(spreadsheet=url_planilha)
-        if df_acao.empty or "What? (O que será feito)" not in df_acao.columns:
+        if df_acao.empty or len(df_acao.columns) < 2:
             df_acao = pd.DataFrame(columns=colunas_5w2h)
-            
-        st.markdown("Edite a tabela abaixo e clique no botão **Salvar no Google Sheets** para sincronizar as ações.")
-        df_editado = st.data_editor(
-            df_acao, 
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "Status": st.column_config.SelectboxColumn("Status", options=["Pendente", "Em Andamento", "Concluído", "Atrasado"], required=True)
-            }
-        )
-        
-        if st.button("💾 Salvar no Google Sheets"):
-            with st.spinner("Salvando..."):
+    except Exception as e:
+        df_acao = pd.DataFrame(columns=colunas_5w2h)
+
+    st.markdown("Edite a tabela abaixo e clique no botão **Salvar no Google Sheets** para sincronizar as ações.")
+    df_editado = st.data_editor(
+        df_acao, 
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "Status": st.column_config.SelectboxColumn("Status", options=["Pendente", "Em Andamento", "Concluído", "Atrasado"], required=True)
+        }
+    )
+    
+    if st.button("💾 Salvar no Google Sheets"):
+        with st.spinner("Salvando..."):
+            try:
                 conn.update(spreadsheet=url_planilha, data=df_editado)
                 st.success("Dados salvos no Google Sheets com sucesso!")
-                
-    except Exception as e:
-        if "UnsupportedOperationError" in str(e):
-            st.error("⚠️ **Bloqueio de Permissão (UnsupportedOperationError)**: O aplicativo está funcionando no modo leitura. Para salvar alterações na planilha do Google via Streamlit, é estritamente obrigatório configurar as chaves da sua **Service Account** no arquivo `.streamlit/secrets.toml`. O link público não concede permissão de escrita automatizada.")
-        else:
-            st.error(f"Erro ao acessar a planilha: {e}")
+            except Exception as e:
+                st.error("⚠️ **Erro de Escrita (UnsupportedOperationError):** Configure as chaves da Service Account do Google no arquivo '.streamlit/secrets.toml' para permitir edição externa na planilha.")
 
 # =====================================================================
 # ABA 3: CONTROLE DE COMPONENTES E LDA
@@ -325,7 +331,7 @@ with aba_lda:
     st.header("🛠️ Análise de Dados de Vida (LDA) - Componentes")
     
     if not LIFELINES_INSTALLED:
-        st.error("⚠️ **Atenção:** A biblioteca `lifelines` não foi encontrada. Adicione a palavra `lifelines` ao seu arquivo `requirements.txt` para habilitar a análise LDA (Aderência Kaplan-Meier).")
+        st.error("⚠️ **Atenção:** A biblioteca `lifelines` não foi encontrada. Adicione `lifelines` ao seu arquivo `requirements.txt`.")
     else:
         st.markdown("Faça o upload da **Planilha de Controle de Componentes** (Ex: *SKT110S & SKT130Pro - Ferro+...*)")
         file_lda = st.file_uploader("Carregue a planilha de componentes (Excel)", type=["xlsx"], key="lda_uploader")
@@ -333,27 +339,26 @@ with aba_lda:
         if file_lda is not None:
             df_comp = pd.read_excel(file_lda, sheet_name=0)
             
-            # Limpeza
             df_comp.columns = df_comp.columns.str.replace('\n', ' ').str.replace('  ', ' ').str.strip()
             
             if 'SITUAÇÃO DO COMPONENTE' in df_comp.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp.columns:
-                # Transforma Situação em Evento Binário (1 = Falhou, 0 = Suspensão/Em operação)
                 df_comp['Status_LDA'] = df_comp['SITUAÇÃO DO COMPONENTE'].apply(lambda x: 1 if isinstance(x, str) and 'falhou' in x.lower() else 0)
                 df_comp['Horas_LDA'] = pd.to_numeric(df_comp['HORAS TRABALHADAS DO COMPONENTE'], errors='coerce')
                 
                 componentes_disp = df_comp['COMPONENTE'].dropna().unique().tolist()
                 comp_alvo = st.selectbox("Selecione o Componente para Análise:", componentes_disp)
                 
+                # O Erro Non-Positive é evitado com o filtro de Horas > 0
                 df_alvo = df_comp[df_comp['COMPONENTE'] == comp_alvo].dropna(subset=['Horas_LDA'])
+                df_alvo = df_alvo[df_alvo['Horas_LDA'] > 0]
                 
                 if len(df_alvo) > 0:
                     falhas_count = df_alvo['Status_LDA'].sum()
                     susp_count = len(df_alvo) - falhas_count
                     
-                    st.write(f"**Amostras no DataSet:** {len(df_alvo)} | **Falhas Exatas:** {falhas_count} | **Suspensões (Censura):** {susp_count}")
+                    st.write(f"**Amostras Úteis no DataSet:** {len(df_alvo)} | **Falhas Confirmadas:** {falhas_count} | **Suspensões (Censura):** {susp_count}")
                     
                     if falhas_count > 0:
-                        # Ajuste LDA com Lifelines
                         wf = WeibullFitter()
                         wf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
                         
@@ -375,8 +380,8 @@ with aba_lda:
                         
                         with tab_l1:
                             fig_l1 = go.Figure()
-                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier (Real empírico)'))
-                            fig_l1.add_trace(go.Scatter(x=t_lda, y=weibull_surv, mode='lines', line=dict(dash='dash', color='red'), name='Weibull (Ajuste)'))
+                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier (Real Empírico)'))
+                            fig_l1.add_trace(go.Scatter(x=t_lda, y=weibull_surv, mode='lines', line=dict(dash='dash', color='red'), name='Weibull (Ajuste Ideal)'))
                             fig_l1.update_layout(title="Aderência da Confiabilidade - LDA", xaxis_title="Horas Operacionais", yaxis_title="R(t)", hovermode="x unified")
                             st.plotly_chart(fig_l1, use_container_width=True)
                             
@@ -390,6 +395,6 @@ with aba_lda:
                             fig_l3.update_layout(title="Taxa de Falha - LDA", xaxis_title="Horas Operacionais", yaxis_title="h(t)", hovermode="x unified")
                             st.plotly_chart(fig_l3, use_container_width=True)
                     else:
-                        st.warning("Não há falhas registradas para este componente (todas as entradas estão 'Em operação'). Não é possível ajustar a curva de sobrevivência.")
+                        st.warning("Não há falhas registradas para este componente (todas as entradas estão 'Em operação'). Não é possível ajustar a curva de sobrevivência sem falhas confirmadas.")
             else:
-                st.error("A planilha carregada não possui as colunas obrigatórias: 'SITUAÇÃO DO COMPONENTE' e 'HORAS TRABALHADAS DO COMPONENTE'.")
+                st.error("A planilha carregada não possui as colunas obrigatórias ('SITUAÇÃO DO COMPONENTE' e 'HORAS TRABALHADAS DO COMPONENTE').")
