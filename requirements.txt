@@ -7,5 +7,5 @@ openpyxl
 openpyxl
 st-gsheets-connection
 lifelines
-kaleido
+kaleido==0.1.0.post1
 fpdf
