@@ -3,8 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy.stats import weibull_min
+import scipy.stats as st_scipy
 import io
+import warnings
+
+warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Dashboard de Manutenção CIM", layout="wide")
 
@@ -48,12 +51,10 @@ if uploaded_file is not None:
     # --- 3. FILTROS LATERAIS ---
     st.sidebar.header("Filtros")
     
-    # Seleção de datas
     min_date = df['DATA INÍCIO'].min()
     max_date = df['DATA FIM'].max()
     date_range = st.sidebar.date_input("Período", [min_date, max_date])
     
-    # Filtros categóricos
     def create_filter(col_name, label):
         if col_name in df.columns:
             options = df[col_name].dropna().unique().tolist()
@@ -69,7 +70,7 @@ if uploaded_file is not None:
     grupo = create_filter('GRUPO', 'Grupo')
     subgrupo = create_filter('SUBGRUPO', 'Subgrupo')
 
-    # Aplicando os filtros
+    # Aplicação de filtros
     mask = (
         (df['MODELO EQUIPAMENTO'].isin(mod_equip)) &
         (df['EQUIPAMENTO'].isin(equip)) &
@@ -86,6 +87,7 @@ if uploaded_file is not None:
     df_filtered = df[mask]
 
     # --- 4. KPIs BÁSICOS ---
+    st.markdown("---")
     st.markdown("### 📊 Indicadores Principais (KPIs)")
     
     corretivas = df_filtered[df_filtered['TIPO'] == 'CORRETIVA']
@@ -94,90 +96,203 @@ if uploaded_file is not None:
     
     mttr = total_downtime / num_falhas if num_falhas > 0 else 0
     
-    # Estimativa de MTBF (assumindo 24h/dia)
     dias_operacao = (date_range[1] - date_range[0]).days if len(date_range) == 2 else 30
     dias_operacao = max(dias_operacao, 1)
-    qtd_equipamentos = df_filtered['EQUIPAMENTO'].nunique()
-    horas_disponiveis = dias_operacao * 24 * qtd_equipamentos
-    mtbf = (horas_disponiveis - total_downtime) / num_falhas if num_falhas > 0 else 0
+    qtd_equipamentos_total = df_filtered['EQUIPAMENTO'].nunique()
+    horas_disponiveis_total = dias_operacao * 24 * qtd_equipamentos_total
+    mtbf = (horas_disponiveis_total - total_downtime) / num_falhas if num_falhas > 0 else 0
     
-    # % Preventiva / Corretiva
     tipos_count = df_filtered['TIPO'].value_counts(normalize=True) * 100
     perc_prev = tipos_count.get('PREVENTIVA', 0)
     perc_corr = tipos_count.get('CORRETIVA', 0)
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("MTBF (Horas)", f"{mtbf:.2f}")
-    col2.metric("MTTR (Horas)", f"{mttr:.2f}")
+    col1.metric("MTBF Global (Horas)", f"{mtbf:.2f}")
+    col2.metric("MTTR Global (Horas)", f"{mttr:.2f}")
     col3.metric("% Preventiva", f"{perc_prev:.1f}%")
     col4.metric("% Corretiva", f"{perc_corr:.1f}%")
 
-    # --- 5. PERFIL DE PERDAS (PARETO) ---
-    st.markdown("### 📉 Perfil de Perdas (Análise de Pareto)")
-    tab1, tab2, tab3 = st.tabs(["Por Equipamento", "Por Grupo", "Por Subgrupo"])
+    # --- 5. RESPONSABILIDADE N1 ---
+    st.markdown("### 👥 Responsabilidade Nível 1 (%)")
+    if 'RESPONSABILIDADE NÍVEL 1' in df_filtered.columns:
+        resp_counts = df_filtered['RESPONSABILIDADE NÍVEL 1'].value_counts(normalize=True).reset_index()
+        resp_counts.columns = ['Responsabilidade', 'Porcentagem']
+        resp_counts['Porcentagem'] = resp_counts['Porcentagem'] * 100
+        
+        fig_resp = px.bar(resp_counts, x='Porcentagem', y='Responsabilidade', orientation='h', 
+                          text=resp_counts['Porcentagem'].apply(lambda x: f'{x:.1f}%'),
+                          color='Porcentagem', color_continuous_scale='Blues')
+        fig_resp.update_layout(yaxis={'categoryorder': 'total ascending'})
+        st.plotly_chart(fig_resp, use_container_width=True)
+
+    # --- 6. MTBF, MTTR E JACK-KNIFE POR EQUIPAMENTO ---
+    st.markdown("---")
+    st.markdown("### 🚜 Análise por Equipamento")
+    
+    if not corretivas.empty:
+        equip_stats = corretivas.groupby('EQUIPAMENTO').agg(
+            Falhas=('OS', 'count'),
+            Downtime=('TOTAL HORAS DECIMAIS', 'sum')
+        ).reset_index()
+        
+        equip_stats['MTTR'] = equip_stats['Downtime'] / equip_stats['Falhas']
+        equip_stats['Horas Disponiveis'] = dias_operacao * 24
+        equip_stats['MTBF'] = (equip_stats['Horas Disponiveis'] - equip_stats['Downtime']) / equip_stats['Falhas']
+        equip_stats['MTBF'] = equip_stats['MTBF'].apply(lambda x: x if x > 0 else 0)
+
+        tab_eq1, tab_eq2, tab_eq3 = st.tabs(["MTBF por Equipamento", "MTTR por Equipamento", "Gráfico de Jack-Knife"])
+        
+        with tab_eq1:
+            fig_mtbf = px.bar(equip_stats.sort_values('MTBF', ascending=False), x='EQUIPAMENTO', y='MTBF', 
+                              text=equip_stats['MTBF'].round(1), title="MTBF por Equipamento (Horas)")
+            fig_mtbf.update_traces(textposition='outside')
+            st.plotly_chart(fig_mtbf, use_container_width=True)
+            
+        with tab_eq2:
+            fig_mttr = px.bar(equip_stats.sort_values('MTTR', ascending=False), x='EQUIPAMENTO', y='MTTR', 
+                              text=equip_stats['MTTR'].round(1), title="MTTR por Equipamento (Horas)", color_discrete_sequence=['indianred'])
+            fig_mttr.update_traces(textposition='outside')
+            st.plotly_chart(fig_mttr, use_container_width=True)
+
+        with tab_eq3:
+            mean_falhas = equip_stats['Falhas'].mean()
+            mean_mttr = equip_stats['MTTR'].mean()
+            
+            fig_jk = px.scatter(equip_stats, x='Falhas', y='MTTR', text='EQUIPAMENTO', size='Downtime',
+                                title='Jack-Knife: Frequência de Falhas vs MTTR (Tamanho da bolha = Downtime)',
+                                labels={'Falhas': 'Número de Falhas', 'MTTR': 'MTTR (Horas)'})
+            fig_jk.add_vline(x=mean_falhas, line_dash="dash", line_color="gray", annotation_text="Média de Falhas")
+            fig_jk.add_hline(y=mean_mttr, line_dash="dash", line_color="gray", annotation_text="MTTR Médio")
+            fig_jk.update_traces(textposition='top center')
+            st.plotly_chart(fig_jk, use_container_width=True)
+
+    # --- 7. PERFIL DE PERDAS (PARETO TOP 18) ---
+    st.markdown("---")
+    st.markdown("### 📉 Perfil de Perdas (Pareto - Top 18)")
+    tab_p1, tab_p2, tab_p3 = st.tabs(["Por Equipamento", "Por Grupo", "Por Subgrupo"])
     
     def plot_pareto(data, col_name, title):
         df_pareto = data.groupby(col_name)['TOTAL HORAS DECIMAIS'].sum().reset_index()
-        df_pareto = df_pareto.sort_values(by='TOTAL HORAS DECIMAIS', ascending=False)
+        df_pareto = df_pareto.sort_values(by='TOTAL HORAS DECIMAIS', ascending=False).head(18) # Limite ao TOP 18
+        
+        if df_pareto.empty:
+            return go.Figure()
+
         df_pareto['Porcentagem Acumulada'] = df_pareto['TOTAL HORAS DECIMAIS'].cumsum() / df_pareto['TOTAL HORAS DECIMAIS'].sum() * 100
         
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=df_pareto[col_name], y=df_pareto['TOTAL HORAS DECIMAIS'], name="Horas de Máquina Parada", marker_color='indianred'))
-        fig.add_trace(go.Scatter(x=df_pareto[col_name], y=df_pareto['Porcentagem Acumulada'], name="% Acumulada", yaxis='y2', mode='lines+markers', line=dict(color='steelblue')))
+        fig.add_trace(go.Bar(x=df_pareto[col_name], y=df_pareto['TOTAL HORAS DECIMAIS'], name="Horas Parada", 
+                             marker_color='indianred', text=df_pareto['TOTAL HORAS DECIMAIS'].round(1), textposition='auto'))
+        fig.add_trace(go.Scatter(x=df_pareto[col_name], y=df_pareto['Porcentagem Acumulada'], name="% Acumulada", 
+                                 yaxis='y2', mode='lines+markers', line=dict(color='steelblue')))
         
         fig.update_layout(
             title=title,
             yaxis=dict(title="Horas"),
             yaxis2=dict(title="%", overlaying='y', side='right', range=[0, 105]),
-            xaxis=dict(tickangle=-45)
+            xaxis=dict(tickangle=-45),
+            hovermode="x unified"
         )
         return fig
 
-    with tab1:
-        st.plotly_chart(plot_pareto(corretivas, 'EQUIPAMENTO', 'Pareto de Perdas por Equipamento'), use_container_width=True)
-    with tab2:
-        st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Pareto de Perdas por Grupo'), use_container_width=True)
-    with tab3:
-        st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Pareto de Perdas por Subgrupo'), use_container_width=True)
+    with tab_p1:
+        st.plotly_chart(plot_pareto(corretivas, 'EQUIPAMENTO', 'Pareto por Equipamento (Top 18)'), use_container_width=True)
+    with tab_p2:
+        st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Pareto por Grupo (Top 18)'), use_container_width=True)
+    with tab_p3:
+        st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Pareto por Subgrupo (Top 18)'), use_container_width=True)
 
-    # --- 6. ANÁLISE DE CONFIABILIDADE (WEIBULL) E RGA ---
-    st.markdown("### 📈 Análise de Confiabilidade e RGA")
+    # --- 8. ANÁLISE DE CONFIABILIDADE (MELHOR DISTRIBUIÇÃO) E RGA ---
+    st.markdown("---")
+    st.markdown("### 📈 Confiabilidade e Probabilidade de Falha")
     
-    if num_falhas > 2:
-        # Extraindo tempos entre falhas (TBF) para ajuste de distribuição
-        # Simplificação: Usando tempo disponível / falhas por equipamento para simular TBF real
+    if num_falhas > 3:
         tbf_data = corretivas.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
         tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
         tbf_clean = tbf_data['TBF'].dropna()
-        tbf_clean = tbf_clean[tbf_clean > 0] # Remover valores 0 ou negativos
+        tbf_clean = tbf_clean[tbf_clean > 0].values
 
-        if not tbf_clean.empty:
-            # Ajuste de Weibull
-            shape, loc, scale = weibull_min.fit(tbf_clean, floc=0)
+        if len(tbf_clean) > 3:
+            # Seleção da melhor distribuição (SSE - Sum of Squared Errors)
+            y_hist, x_hist = np.histogram(tbf_clean, bins='auto', density=True)
+            x_mids = (x_hist + np.roll(x_hist, -1))[:-1] / 2.0
+
+            dists = {
+                'Weibull': st_scipy.weibull_min,
+                'Exponencial': st_scipy.expon,
+                'Normal': st_scipy.norm,
+                'Lognormal': st_scipy.lognorm
+            }
             
-            st.write(f"**Parâmetros da Distribuição de Weibull:** Beta (Forma) = {shape:.2f} | Eta (Vida Característica) = {scale:.2f} horas")
+            best_sse = np.inf
+            best_name = ""
+            best_params = None
             
-            # Curva de Confiabilidade R(t)
-            t = np.linspace(0.1, tbf_clean.max() * 1.2, 100)
-            reliability = weibull_min.sf(t, shape, loc=loc, scale=scale)
-            
-            fig_rel = go.Figure()
-            fig_rel.add_trace(go.Scatter(x=t, y=reliability, mode='lines', name='R(t) - Confiabilidade', line=dict(color='green')))
-            fig_rel.update_layout(title="Curva de Confiabilidade - R(t) (Distribuição de Weibull)", xaxis_title="Tempo Operacional (Horas)", yaxis_title="Probabilidade de Sobrevivência")
-            
-            st.plotly_chart(fig_rel, use_container_width=True)
-            
-            # Análise RGA - Gráfico de Duane (MTBF Acumulado)
-            tbf_data['Tempo Acumulado'] = tbf_data['TOTAL HORAS DECIMAIS'].cumsum() # Aproximação de RGA
-            tbf_data['Falhas Acumuladas'] = range(1, len(tbf_data) + 1)
-            tbf_data['MTBF Acumulado'] = tbf_data['Tempo Acumulado'] / tbf_data['Falhas Acumuladas']
-            
-            fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title="Reliability Growth Analysis (RGA) - Crescimento da Confiabilidade")
-            st.plotly_chart(fig_rga, use_container_width=True)
+            for name, distribution in dists.items():
+                params = distribution.fit(tbf_clean)
+                arg = params[:-2]
+                loc = params[-2]
+                scale = params[-1]
+                pdf = distribution.pdf(x_mids, loc=loc, scale=scale, *arg)
+                sse = np.sum(np.power(y_hist - pdf, 2.0))
+                
+                if sse < best_sse:
+                    best_sse = sse
+                    best_name = name
+                    best_params = params
+
+            st.success(f"**Melhor distribuição estatística encontrada:** {best_name} (Aderência com base no menor Erro Quadrático)")
+
+            # Calcular as curvas baseadas na melhor distribuição
+            t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
+            dist_obj = dists[best_name]
+            arg = best_params[:-2]
+            loc = best_params[-2]
+            scale = best_params[-1]
+
+            reliability = dist_obj.sf(t, loc=loc, scale=scale, *arg) # R(t)
+            prob_failure = dist_obj.cdf(t, loc=loc, scale=scale, *arg) # F(t)
+            pdf_vals = dist_obj.pdf(t, loc=loc, scale=scale, *arg) # f(t)
+            hazard_rate = pdf_vals / reliability # h(t) = f(t)/R(t)
+            hazard_rate[np.isinf(hazard_rate)] = 0 # Evitar divisões por zero
+
+            tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade de Falha F(t)", "Taxa de Falha h(t)", "RGA (Crescimento)"])
+
+            def setup_hover(fig):
+                fig.update_layout(hovermode="x unified")
+                fig.update_xaxes(showspikes=True, spikecolor="gray", spikesnap="cursor", spikemode="across")
+                return fig
+
+            with tab_r1:
+                fig_rel = go.Figure()
+                fig_rel.add_trace(go.Scatter(x=t, y=reliability, mode='lines', name='Confiabilidade', line=dict(color='green')))
+                fig_rel.update_layout(title=f"Curva de Confiabilidade R(t) - {best_name}", xaxis_title="Tempo (Horas)", yaxis_title="Probabilidade")
+                st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
+
+            with tab_r2:
+                fig_prob = go.Figure()
+                fig_prob.add_trace(go.Scatter(x=t, y=prob_failure, mode='lines', name='Prob. Falha', line=dict(color='red')))
+                fig_prob.update_layout(title=f"Probabilidade de Falha F(t) - {best_name}", xaxis_title="Tempo (Horas)", yaxis_title="Probabilidade")
+                st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
+
+            with tab_r3:
+                fig_haz = go.Figure()
+                fig_haz.add_trace(go.Scatter(x=t, y=hazard_rate, mode='lines', name='Taxa de Falha', line=dict(color='orange')))
+                fig_haz.update_layout(title=f"Taxa de Falha h(t) - {best_name}", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
+                st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
+
+            with tab_r4:
+                # Análise RGA
+                tbf_data['Tempo Acumulado'] = tbf_data['TOTAL HORAS DECIMAIS'].cumsum()
+                tbf_data['Falhas Acumuladas'] = range(1, len(tbf_data) + 1)
+                tbf_data['MTBF Acumulado'] = tbf_data['Tempo Acumulado'] / tbf_data['Falhas Acumuladas']
+                
+                fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title="Reliability Growth Analysis (RGA)", markers=True)
+                st.plotly_chart(setup_hover(fig_rga), use_container_width=True)
         else:
-            st.warning("Dados de datas insuficientes para calcular os Tempos Entre Falhas (TBF).")
+            st.warning("Dados de TBF insuficientes (valores positivos).")
     else:
-        st.info("São necessárias pelo menos 3 ocorrências corretivas para gerar a curva de confiabilidade.")
+        st.info("São necessárias mais ocorrências corretivas para gerar análises de distribuição.")
 
 else:
-    st.info("Por favor, faça o upload de uma planilha Excel (como a 'PLANILHA CIM.xlsx') na barra lateral para começar a análise.")
+    st.info("Por favor, faça o upload de uma planilha Excel na barra lateral.")
