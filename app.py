@@ -4,19 +4,33 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import scipy.stats as st_scipy
+from scipy.special import gamma
 import io
 import warnings
 from streamlit_gsheets import GSheetsConnection
 
+# Importação da biblioteca lifelines para LDA
+try:
+    from lifelines import WeibullFitter, KaplanMeierFitter
+    LIFELINES_INSTALLED = True
+except ImportError:
+    LIFELINES_INSTALLED = False
+
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="Dashboard de Manutenção CIM", layout="wide")
+st.set_page_config(page_title="Dashboard de Manutenção CIM", layout="wide", page_icon="⚙️")
 
 # --- NAVEGAÇÃO POR ABAS PRINCIPAIS ---
-aba_dashboard, aba_plano_acao = st.tabs(["📊 Dashboard de Confiabilidade", "📝 Plano de Ação (5W2H)"])
+aba_dashboard, aba_plano_acao, aba_lda = st.tabs([
+    "📊 Dashboard de OS", 
+    "📝 Plano de Ação (5W2H)", 
+    "🛠️ Análise LDA (Componentes)"
+])
 
+# =====================================================================
+# ABA 1: DASHBOARD DE ORDENS DE SERVIÇO
+# =====================================================================
 with aba_dashboard:
-    # --- 1. FUNÇÃO PARA DOWNLOAD DE TEMPLATE ---
     def generate_template():
         columns = [
             'MODELO EQUIPAMENTO', 'EQUIPAMENTO', 'TIPO', 
@@ -37,9 +51,8 @@ with aba_dashboard:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # --- 2. UPLOAD E LEITURA DE DADOS ---
     st.title("⚙️ Dashboard de Engenharia de Manutenção")
-    uploaded_file = st.sidebar.file_uploader("Carregue sua planilha de ordens de serviço (Excel)", type=["xlsx"])
+    uploaded_file = st.sidebar.file_uploader("Carregue sua planilha de ordens de serviço (Ex: PLANILHA CIM)", type=["xlsx"])
 
     if uploaded_file is not None:
         df = pd.read_excel(uploaded_file, sheet_name=0)
@@ -50,7 +63,6 @@ with aba_dashboard:
         df['TOTAL HORAS DECIMAIS'] = pd.to_numeric(df['TOTAL HORAS DECIMAIS'], errors='coerce').fillna(0)
         df['TIPO'] = df['TIPO'].astype(str).str.upper().str.strip()
 
-        # --- 3. FILTROS LATERAIS EM CASCATA ---
         st.sidebar.header("Filtros em Cascata")
         st.sidebar.markdown("*Deixe vazio para selecionar todos*")
         
@@ -80,7 +92,7 @@ with aba_dashboard:
         df_filtered = apply_cascading_filter(df_filtered, 'GRUPO', 'Grupo')
         df_filtered = apply_cascading_filter(df_filtered, 'SUBGRUPO', 'Subgrupo')
 
-        # --- 4. KPIs BÁSICOS ---
+        # --- KPIs BÁSICOS ---
         st.markdown("---")
         st.markdown("### 📊 Indicadores Principais (KPIs)")
         
@@ -106,7 +118,7 @@ with aba_dashboard:
         col3.metric("% Preventiva", f"{perc_prev:.1f}%")
         col4.metric("% Corretiva", f"{perc_corr:.1f}%")
 
-        # --- 5. EVOLUÇÃO MENSAL E RESPONSABILIDADE ---
+        # --- EVOLUÇÃO MENSAL E RESPONSABILIDADE ---
         st.markdown("---")
         col_evol, col_resp = st.columns([2, 1])
         
@@ -134,7 +146,7 @@ with aba_dashboard:
                 fig_resp = px.bar(resp_counts, x='Porcentagem', y='Resp', orientation='h', text=resp_counts['Porcentagem'].apply(lambda x: f'{x:.1f}%'), color='Porcentagem', color_continuous_scale='Blues')
                 st.plotly_chart(fig_resp, use_container_width=True)
 
-        # --- 6. MTBF, MTTR E JACK-KNIFE POR EQUIPAMENTO ---
+        # --- MTBF, MTTR E JACK-KNIFE POR EQUIPAMENTO ---
         st.markdown("---")
         st.markdown("### 🚜 Análise por Equipamento e Jack-Knife")
         
@@ -184,7 +196,7 @@ with aba_dashboard:
                 fig_mttr.update_traces(textposition='outside')
                 st.plotly_chart(fig_mttr, use_container_width=True)
 
-        # --- 7. PERFIL DE PERDAS (PARETO TOP 18) ---
+        # --- PARETO (TOP 18) ---
         st.markdown("---")
         st.markdown("### 📉 Perfil de Perdas (Pareto - Top 18)")
         tab_p1, tab_p2, tab_p3 = st.tabs(["Por Equipamento", "Por Grupo", "Por Subgrupo"])
@@ -206,7 +218,7 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
-        # --- 8. ANÁLISE DE CONFIABILIDADE ---
+        # --- CONFIABILIDADE (APENAS WEIBULL) ---
         st.markdown("---")
         st.markdown("### 📈 Confiabilidade e Probabilidade de Falha")
         
@@ -217,34 +229,17 @@ with aba_dashboard:
             tbf_clean = tbf_clean[tbf_clean > 0].values
 
             if len(tbf_clean) > 3:
-                y_hist, x_hist = np.histogram(tbf_clean, bins='auto', density=True)
-                x_mids = (x_hist + np.roll(x_hist, -1))[:-1] / 2.0
-
-                dists = {'Weibull': st_scipy.weibull_min, 'Exponencial': st_scipy.expon, 'Normal': st_scipy.norm, 'Lognormal': st_scipy.lognorm}
-                best_sse = np.inf
-                best_name = ""
-                best_params = None
+                # Ajuste Exclusivo com Distribuição de Weibull (scipy.stats.weibull_min)
+                shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
+                beta = shape
+                eta = scale
                 
-                for name, distribution in dists.items():
-                    params = distribution.fit(tbf_clean)
-                    arg = params[:-2]
-                    loc = params[-2]
-                    scale = params[-1]
-                    pdf = distribution.pdf(x_mids, loc=loc, scale=scale, *arg)
-                    sse = np.sum(np.power(y_hist - pdf, 2.0))
-                    
-                    if sse < best_sse:
-                        best_sse = sse; best_name = name; best_params = params
-
-                st.success(f"**Melhor distribuição estatística encontrada:** {best_name}")
+                st.success(f"**Distribuição Utilizada:** Weibull | **Parâmetro de Forma ($\\beta$):** {beta:.3f} | **Vida Característica ($\\eta$):** {eta:.2f} horas")
 
                 t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
-                dist_obj = dists[best_name]
-                arg = best_params[:-2]; loc = best_params[-2]; scale = best_params[-1]
-
-                reliability = dist_obj.sf(t, loc=loc, scale=scale, *arg)
-                prob_failure = dist_obj.cdf(t, loc=loc, scale=scale, *arg)
-                hazard_rate = dist_obj.pdf(t, loc=loc, scale=scale, *arg) / reliability
+                reliability = st_scipy.weibull_min.sf(t, shape, loc=0, scale=scale)
+                prob_failure = st_scipy.weibull_min.cdf(t, shape, loc=0, scale=scale)
+                hazard_rate = st_scipy.weibull_min.pdf(t, shape, loc=0, scale=scale) / reliability
                 hazard_rate[np.isinf(hazard_rate)] = 0
 
                 tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade de Falha F(t)", "Taxa de Falha h(t)", "RGA"])
@@ -256,17 +251,17 @@ with aba_dashboard:
 
                 with tab_r1:
                     fig_rel = go.Figure(go.Scatter(x=t, y=reliability, mode='lines', name='Confiabilidade', line=dict(color='green')))
-                    fig_rel.update_layout(title="Curva de Confiabilidade R(t)")
+                    fig_rel.update_layout(title="Curva de Confiabilidade R(t) - Weibull", xaxis_title="Tempo (Horas)", yaxis_title="R(t)")
                     st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
 
                 with tab_r2:
                     fig_prob = go.Figure(go.Scatter(x=t, y=prob_failure, mode='lines', name='Prob. Acumulada', line=dict(color='red')))
-                    fig_prob.update_layout(title="Probabilidade de Falha F(t)")
+                    fig_prob.update_layout(title="Probabilidade de Falha F(t) - Weibull", xaxis_title="Tempo (Horas)", yaxis_title="F(t)")
                     st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
 
                 with tab_r3:
                     fig_haz = go.Figure(go.Scatter(x=t, y=hazard_rate, mode='lines', name='Taxa (h(t))', line=dict(color='orange')))
-                    fig_haz.update_layout(title="Taxa de Falha h(t)")
+                    fig_haz.update_layout(title="Taxa de Falha h(t) - Weibull", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
                     st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
 
                 with tab_r4:
@@ -276,19 +271,19 @@ with aba_dashboard:
                     fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title="RGA - Crescimento da Confiabilidade", markers=True)
                     st.plotly_chart(setup_hover(fig_rga), use_container_width=True)
 
-        else:
-            st.info("São necessárias mais ocorrências para análises de distribuição e confiabilidade.")
-
+            else:
+                st.warning("Dados de TBF insuficientes (valores positivos).")
     else:
         st.info("Por favor, faça o upload da planilha Excel para iniciar o Dashboard.")
 
-# --- ABA DO PLANO DE AÇÃO 5W2H (Sincronizado via Google Sheets) ---
+# =====================================================================
+# ABA 2: PLANO DE AÇÃO 5W2H (Google Sheets)
+# =====================================================================
 with aba_plano_acao:
     st.header("📋 Plano de Ação 5W2H (Google Sheets)")
     
     url_planilha = "https://docs.google.com/spreadsheets/d/1mrfp_qDdX5_6sJVT5-Gk3NzM3nKqznmlR6rwDsXZN2s/edit?gid=0#gid=0"
     
-    # Estabelece conexão nativa com o Google Sheets
     conn = st.connection("gsheets", type=GSheetsConnection)
     
     colunas_5w2h = [
@@ -298,32 +293,103 @@ with aba_plano_acao:
     ]
 
     try:
-        # Tenta ler os dados da planilha
         df_acao = conn.read(spreadsheet=url_planilha)
-        # Se a planilha estiver completamente vazia, inicia com as colunas certas
         if df_acao.empty or "What? (O que será feito)" not in df_acao.columns:
             df_acao = pd.DataFrame(columns=colunas_5w2h)
+            
+        st.markdown("Edite a tabela abaixo e clique no botão **Salvar no Google Sheets** para sincronizar as ações.")
+        df_editado = st.data_editor(
+            df_acao, 
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "Status": st.column_config.SelectboxColumn("Status", options=["Pendente", "Em Andamento", "Concluído", "Atrasado"], required=True)
+            }
+        )
+        
+        if st.button("💾 Salvar no Google Sheets"):
+            with st.spinner("Salvando..."):
+                conn.update(spreadsheet=url_planilha, data=df_editado)
+                st.success("Dados salvos no Google Sheets com sucesso!")
+                
     except Exception as e:
-        st.warning("Não foi possível ler a planilha ou ela está vazia. Certifique-se de que a configuração 'secrets.toml' está correta.")
-        df_acao = pd.DataFrame(columns=colunas_5w2h)
+        if "UnsupportedOperationError" in str(e):
+            st.error("⚠️ **Bloqueio de Permissão (UnsupportedOperationError)**: O aplicativo está funcionando no modo leitura. Para salvar alterações na planilha do Google via Streamlit, é estritamente obrigatório configurar as chaves da sua **Service Account** no arquivo `.streamlit/secrets.toml`. O link público não concede permissão de escrita automatizada.")
+        else:
+            st.error(f"Erro ao acessar a planilha: {e}")
 
-    # Editor de dados interativo
-    st.markdown("Edite a tabela abaixo e clique no botão **Salvar no Google Sheets** para sincronizar suas ações em tempo real.")
-    df_editado = st.data_editor(
-        df_acao, 
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "Status": st.column_config.SelectboxColumn(
-                "Status",
-                options=["Pendente", "Em Andamento", "Concluído", "Atrasado"],
-                required=True,
-            )
-        }
-    )
+# =====================================================================
+# ABA 3: CONTROLE DE COMPONENTES E LDA
+# =====================================================================
+with aba_lda:
+    st.header("🛠️ Análise de Dados de Vida (LDA) - Componentes")
     
-    if st.button("💾 Salvar no Google Sheets"):
-        with st.spinner("Salvando..."):
-            # O st-gsheets-connection sobrescreve os dados atualizados de volta na planilha
-            conn.update(spreadsheet=url_planilha, data=df_editado)
-            st.success("Dados salvos no Google Sheets com sucesso!")
+    if not LIFELINES_INSTALLED:
+        st.error("⚠️ **Atenção:** A biblioteca `lifelines` não foi encontrada. Adicione a palavra `lifelines` ao seu arquivo `requirements.txt` para habilitar a análise LDA (Aderência Kaplan-Meier).")
+    else:
+        st.markdown("Faça o upload da **Planilha de Controle de Componentes** (Ex: *SKT110S & SKT130Pro - Ferro+...*)")
+        file_lda = st.file_uploader("Carregue a planilha de componentes (Excel)", type=["xlsx"], key="lda_uploader")
+        
+        if file_lda is not None:
+            df_comp = pd.read_excel(file_lda, sheet_name=0)
+            
+            # Limpeza
+            df_comp.columns = df_comp.columns.str.replace('\n', ' ').str.replace('  ', ' ').str.strip()
+            
+            if 'SITUAÇÃO DO COMPONENTE' in df_comp.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp.columns:
+                # Transforma Situação em Evento Binário (1 = Falhou, 0 = Suspensão/Em operação)
+                df_comp['Status_LDA'] = df_comp['SITUAÇÃO DO COMPONENTE'].apply(lambda x: 1 if isinstance(x, str) and 'falhou' in x.lower() else 0)
+                df_comp['Horas_LDA'] = pd.to_numeric(df_comp['HORAS TRABALHADAS DO COMPONENTE'], errors='coerce')
+                
+                componentes_disp = df_comp['COMPONENTE'].dropna().unique().tolist()
+                comp_alvo = st.selectbox("Selecione o Componente para Análise:", componentes_disp)
+                
+                df_alvo = df_comp[df_comp['COMPONENTE'] == comp_alvo].dropna(subset=['Horas_LDA'])
+                
+                if len(df_alvo) > 0:
+                    falhas_count = df_alvo['Status_LDA'].sum()
+                    susp_count = len(df_alvo) - falhas_count
+                    
+                    st.write(f"**Amostras no DataSet:** {len(df_alvo)} | **Falhas Exatas:** {falhas_count} | **Suspensões (Censura):** {susp_count}")
+                    
+                    if falhas_count > 0:
+                        # Ajuste LDA com Lifelines
+                        wf = WeibullFitter()
+                        wf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
+                        
+                        beta_lda = wf.rho_
+                        eta_lda = wf.lambda_
+                        mttf_lda = eta_lda * gamma(1 + (1/beta_lda))
+                        
+                        st.success(f"**Parâmetros LDA (Weibull Fitter):** $\\beta$ (Forma) = {beta_lda:.2f} | $\\eta$ (Vida Característica) = {eta_lda:.2f}h | **MTTF Estimado:** {mttf_lda:.2f}h")
+                        
+                        kmf = KaplanMeierFitter()
+                        kmf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
+                        
+                        t_lda = np.linspace(0.1, df_alvo['Horas_LDA'].max() * 1.2, 100)
+                        weibull_surv = wf.survival_function_at_times(t_lda)
+                        weibull_cdf = wf.cumulative_density_at_times(t_lda)
+                        weibull_haz = wf.hazard_at_times(t_lda)
+                        
+                        tab_l1, tab_l2, tab_l3 = st.tabs(["Kaplan-Meier vs Weibull", "Probabilidade de Falha F(t)", "Taxa de Falha h(t)"])
+                        
+                        with tab_l1:
+                            fig_l1 = go.Figure()
+                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier (Real empírico)'))
+                            fig_l1.add_trace(go.Scatter(x=t_lda, y=weibull_surv, mode='lines', line=dict(dash='dash', color='red'), name='Weibull (Ajuste)'))
+                            fig_l1.update_layout(title="Aderência da Confiabilidade - LDA", xaxis_title="Horas Operacionais", yaxis_title="R(t)", hovermode="x unified")
+                            st.plotly_chart(fig_l1, use_container_width=True)
+                            
+                        with tab_l2:
+                            fig_l2 = go.Figure(go.Scatter(x=t_lda, y=weibull_cdf, mode='lines', line=dict(color='orange')))
+                            fig_l2.update_layout(title="Probabilidade Acumulada de Falha - LDA", xaxis_title="Horas Operacionais", yaxis_title="F(t)", hovermode="x unified")
+                            st.plotly_chart(fig_l2, use_container_width=True)
+                            
+                        with tab_l3:
+                            fig_l3 = go.Figure(go.Scatter(x=t_lda, y=weibull_haz, mode='lines', line=dict(color='purple')))
+                            fig_l3.update_layout(title="Taxa de Falha - LDA", xaxis_title="Horas Operacionais", yaxis_title="h(t)", hovermode="x unified")
+                            st.plotly_chart(fig_l3, use_container_width=True)
+                    else:
+                        st.warning("Não há falhas registradas para este componente (todas as entradas estão 'Em operação'). Não é possível ajustar a curva de sobrevivência.")
+            else:
+                st.error("A planilha carregada não possui as colunas obrigatórias: 'SITUAÇÃO DO COMPONENTE' e 'HORAS TRABALHADAS DO COMPONENTE'.")
