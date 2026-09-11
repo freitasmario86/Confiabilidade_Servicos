@@ -9,7 +9,6 @@ import io
 import warnings
 from streamlit_gsheets import GSheetsConnection
 
-# Importação da biblioteca lifelines para LDA
 try:
     from lifelines import WeibullFitter, KaplanMeierFitter
     LIFELINES_INSTALLED = True
@@ -63,18 +62,17 @@ with aba_dashboard:
         df['TOTAL HORAS DECIMAIS'] = pd.to_numeric(df['TOTAL HORAS DECIMAIS'], errors='coerce').fillna(0)
         df['TIPO'] = df['TIPO'].astype(str).str.upper().str.strip()
 
+        # --- FILTROS EM CASCATA ---
         st.sidebar.header("Filtros em Cascata")
         st.sidebar.markdown("*Deixe vazio para selecionar todos*")
         
         min_date = df['DATA INÍCIO'].min()
         max_date = df['DATA FIM'].max()
-        date_range = st.sidebar.date_input("Período", [min_date, max_date])
+        date_range = st.sidebar.date_input("Período (Afeta apenas KPIs e Pareto)", [min_date, max_date])
         
-        if len(date_range) == 2:
-            df_filtered = df[(df['DATA INÍCIO'].dt.date >= date_range[0]) & (df['DATA INÍCIO'].dt.date <= date_range[1])]
-        else:
-            df_filtered = df.copy()
-
+        # 1. Aplica filtros de dropdown PRIMEIRO (Para que a Evolução Mensal respeite os grupos, mas ignore a data)
+        df_cascaded = df.copy()
+        
         def apply_cascading_filter(df_in, col_name, label):
             if col_name in df_in.columns:
                 options = df_in[col_name].dropna().astype(str).unique().tolist()
@@ -84,17 +82,24 @@ with aba_dashboard:
                     df_in = df_in[df_in[col_name].astype(str).isin(selected)]
             return df_in
 
-        df_filtered = apply_cascading_filter(df_filtered, 'MODELO EQUIPAMENTO', 'Modelo Equipamento')
-        df_filtered = apply_cascading_filter(df_filtered, 'EQUIPAMENTO', 'Equipamento')
-        df_filtered = apply_cascading_filter(df_filtered, 'TIPO', 'Tipo de OS')
-        df_filtered = apply_cascading_filter(df_filtered, 'RESPONSABILIDADE NÍVEL 1', 'Responsabilidade N1')
-        df_filtered = apply_cascading_filter(df_filtered, 'RESPONSABILIDADE NÍVEL 2', 'Responsabilidade N2')
-        df_filtered = apply_cascading_filter(df_filtered, 'GRUPO', 'Grupo')
-        df_filtered = apply_cascading_filter(df_filtered, 'SUBGRUPO', 'Subgrupo')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'MODELO EQUIPAMENTO', 'Modelo Equipamento')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'EQUIPAMENTO', 'Equipamento')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'TIPO', 'Tipo de OS')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'RESPONSABILIDADE NÍVEL 1', 'Responsabilidade N1')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'RESPONSABILIDADE NÍVEL 2', 'Responsabilidade N2')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'GRUPO', 'Grupo')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'SUBGRUPO', 'Subgrupo')
+
+        # 2. Aplica filtro de data APENAS para os KPIs principais e Pareto
+        if len(date_range) == 2:
+            mask_date = (df_cascaded['DATA INÍCIO'].dt.date >= date_range[0]) & (df_cascaded['DATA INÍCIO'].dt.date <= date_range[1])
+            df_filtered = df_cascaded[mask_date]
+        else:
+            df_filtered = df_cascaded.copy()
 
         # --- KPIs BÁSICOS ---
         st.markdown("---")
-        st.markdown("### 📊 Indicadores Principais (KPIs)")
+        st.markdown("### 📊 Indicadores Principais (KPIs no Período)")
         
         corretivas = df_filtered[df_filtered['TIPO'] == 'CORRETIVA']
         num_falhas = len(corretivas)
@@ -118,17 +123,21 @@ with aba_dashboard:
         col3.metric("% Preventiva", f"{perc_prev:.1f}%")
         col4.metric("% Corretiva", f"{perc_corr:.1f}%")
 
-        # --- EVOLUÇÃO MENSAL E RESPONSABILIDADE ---
+        # --- EVOLUÇÃO MENSAL (LIVRE DE FILTRO DE DATA) ---
         st.markdown("---")
         col_evol, col_resp = st.columns([2, 1])
         
         with col_evol:
-            st.markdown("### 📅 Evolução Mensal (MTBF e MTTR)")
-            if not corretivas.empty:
-                corretivas['Ano-Mês'] = corretivas['DATA INÍCIO'].dt.strftime('%Y-%m')
-                evol_stats = corretivas.groupby('Ano-Mês').agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
+            st.markdown("### 📅 Evolução Mensal Histórica (MTBF e MTTR)")
+            # Usando df_cascaded para ignorar o filtro de data, mas respeitar equipamentos/grupos
+            corretivas_evol = df_cascaded[df_cascaded['TIPO'] == 'CORRETIVA']
+            if not corretivas_evol.empty:
+                corretivas_evol['Ano-Mês'] = corretivas_evol['DATA INÍCIO'].dt.strftime('%Y-%m')
+                evol_stats = corretivas_evol.groupby('Ano-Mês').agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
                 evol_stats['MTTR'] = evol_stats['Downtime'] / evol_stats['Falhas']
-                evol_stats['MTBF'] = ((730 * qtd_equipamentos_total) - evol_stats['Downtime']) / evol_stats['Falhas']
+                
+                qtd_equip_evol = df_cascaded['EQUIPAMENTO'].nunique() if not df_cascaded.empty else 1
+                evol_stats['MTBF'] = ((730 * qtd_equip_evol) - evol_stats['Downtime']) / evol_stats['Falhas']
                 evol_stats['MTBF'] = evol_stats['MTBF'].apply(lambda x: x if x > 0 else 0)
                 
                 fig_evol = go.Figure()
@@ -144,6 +153,7 @@ with aba_dashboard:
                 resp_counts.columns = ['Resp', 'Porcentagem']
                 resp_counts['Porcentagem'] = resp_counts['Porcentagem'] * 100
                 fig_resp = px.bar(resp_counts, x='Porcentagem', y='Resp', orientation='h', text=resp_counts['Porcentagem'].apply(lambda x: f'{x:.1f}%'), color='Porcentagem', color_continuous_scale='Blues')
+                fig_resp.update_layout(yaxis={'categoryorder': 'total ascending'})
                 st.plotly_chart(fig_resp, use_container_width=True)
 
         # --- MTBF, MTTR E JACK-KNIFE DINÂMICO ---
@@ -154,7 +164,6 @@ with aba_dashboard:
         if not corretivas.empty and dimensao in corretivas.columns:
             dim_stats = corretivas.groupby(dimensao).agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
             
-            # Conta equipamentos únicos para calcular as horas corretamente para Grupos e Subgrupos
             equip_count = df_filtered.groupby(dimensao)['EQUIPAMENTO'].nunique().reset_index(name='Qtd_Equip')
             dim_stats = pd.merge(dim_stats, equip_count, on=dimensao)
             
@@ -171,8 +180,10 @@ with aba_dashboard:
                 max_f = dim_stats['Falhas'].max() * 1.1 if not dim_stats.empty else 1
                 max_m = dim_stats['MTTR'].max() * 1.1 if not dim_stats.empty else 1
                 
-                fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', text=dimensao, size='Downtime',
-                                    title=f'Jack-Knife ({dimensao.title()})', labels={'Falhas': 'Número de Falhas', 'MTTR': 'MTTR (Horas)'})
+                # Gráfico Limpo: Sem 'text=dimensao', usando hover_name para aparecer só no mouse
+                fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', hover_name=dimensao, size='Downtime',
+                                    title=f'Jack-Knife ({dimensao.title()})', labels={'Falhas': 'Número de Falhas', 'MTTR': 'MTTR (Horas)'},
+                                    opacity=0.7)
                 
                 fig_jk.add_shape(type="rect", x0=0, y0=0, x1=mean_falhas, y1=mean_mttr, fillcolor="lightgreen", opacity=0.2, layer="below", line_width=0)
                 fig_jk.add_shape(type="rect", x0=mean_falhas, y0=0, x1=max_f, y1=mean_mttr, fillcolor="yellow", opacity=0.2, layer="below", line_width=0)
@@ -181,7 +192,6 @@ with aba_dashboard:
 
                 fig_jk.add_vline(x=mean_falhas, line_dash="dash", line_color="black")
                 fig_jk.add_hline(y=mean_mttr, line_dash="dash", line_color="black")
-                fig_jk.update_traces(textposition='top center')
                 fig_jk.update_xaxes(range=[0, max_f])
                 fig_jk.update_yaxes(range=[0, max_m])
                 st.plotly_chart(fig_jk, use_container_width=True)
@@ -236,7 +246,6 @@ with aba_dashboard:
             tbf_clean = tbf_clean[tbf_clean > 0].values
 
             if len(tbf_clean) > 3:
-                # Ajuste Exclusivo com Distribuição de Weibull
                 shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
                 beta = shape
                 eta = scale
@@ -298,12 +307,11 @@ with aba_plano_acao:
         "How? (Como)", "How Much? (Custo Estimado)", "Status"
     ]
 
-    # Correção: Ignora o erro se a planilha estiver completamente vazia (No columns to parse)
     try:
         df_acao = conn.read(spreadsheet=url_planilha)
         if df_acao.empty or len(df_acao.columns) < 2:
             df_acao = pd.DataFrame(columns=colunas_5w2h)
-    except Exception as e:
+    except Exception:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
 
     st.markdown("Edite a tabela abaixo e clique no botão **Salvar no Google Sheets** para sincronizar as ações.")
@@ -322,7 +330,10 @@ with aba_plano_acao:
                 conn.update(spreadsheet=url_planilha, data=df_editado)
                 st.success("Dados salvos no Google Sheets com sucesso!")
             except Exception as e:
-                st.error("⚠️ **Erro de Escrita (UnsupportedOperationError):** Configure as chaves da Service Account do Google no arquivo '.streamlit/secrets.toml' para permitir edição externa na planilha.")
+                # Fallback: Se o Google barrar, permite baixar o CSV.
+                st.error("⚠️ **Erro de Permissão (Service Account):** O Streamlit Cloud não tem permissão para escrever na planilha pública sem as chaves de acesso. Baixe a tabela abaixo para não perder seu trabalho.")
+                csv = df_editado.to_csv(index=False).encode('utf-8')
+                st.download_button(label="📥 Baixar Plano de Ação (CSV)", data=csv, file_name='plano_acao_backup.csv', mime='text/csv')
 
 # =====================================================================
 # ABA 3: CONTROLE DE COMPONENTES E LDA
@@ -338,17 +349,24 @@ with aba_lda:
         
         if file_lda is not None:
             df_comp = pd.read_excel(file_lda, sheet_name=0)
-            
             df_comp.columns = df_comp.columns.str.replace('\n', ' ').str.replace('  ', ' ').str.strip()
             
             if 'SITUAÇÃO DO COMPONENTE' in df_comp.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp.columns:
+                
+                # --- Filtro de MODELO ---
+                if 'MODELO' in df_comp.columns:
+                    modelos_disp = df_comp['MODELO'].dropna().astype(str).unique().tolist()
+                    modelo_alvo = st.multiselect("Filtre pelo Modelo:", modelos_disp, default=modelos_disp)
+                    if modelo_alvo:
+                        df_comp = df_comp[df_comp['MODELO'].astype(str).isin(modelo_alvo)]
+                
                 df_comp['Status_LDA'] = df_comp['SITUAÇÃO DO COMPONENTE'].apply(lambda x: 1 if isinstance(x, str) and 'falhou' in x.lower() else 0)
                 df_comp['Horas_LDA'] = pd.to_numeric(df_comp['HORAS TRABALHADAS DO COMPONENTE'], errors='coerce')
                 
                 componentes_disp = df_comp['COMPONENTE'].dropna().unique().tolist()
                 comp_alvo = st.selectbox("Selecione o Componente para Análise:", componentes_disp)
                 
-                # O Erro Non-Positive é evitado com o filtro de Horas > 0
+                # Garante que só passem horas maiores que zero para evitar o erro do lifelines
                 df_alvo = df_comp[df_comp['COMPONENTE'] == comp_alvo].dropna(subset=['Horas_LDA'])
                 df_alvo = df_alvo[df_alvo['Horas_LDA'] > 0]
                 
@@ -356,7 +374,7 @@ with aba_lda:
                     falhas_count = df_alvo['Status_LDA'].sum()
                     susp_count = len(df_alvo) - falhas_count
                     
-                    st.write(f"**Amostras Úteis no DataSet:** {len(df_alvo)} | **Falhas Confirmadas:** {falhas_count} | **Suspensões (Censura):** {susp_count}")
+                    st.write(f"**Amostras Úteis:** {len(df_alvo)} | **Falhas Confirmadas:** {falhas_count} | **Suspensões (Censura):** {susp_count}")
                     
                     if falhas_count > 0:
                         wf = WeibullFitter()
@@ -395,6 +413,6 @@ with aba_lda:
                             fig_l3.update_layout(title="Taxa de Falha - LDA", xaxis_title="Horas Operacionais", yaxis_title="h(t)", hovermode="x unified")
                             st.plotly_chart(fig_l3, use_container_width=True)
                     else:
-                        st.warning("Não há falhas registradas para este componente (todas as entradas estão 'Em operação'). Não é possível ajustar a curva de sobrevivência sem falhas confirmadas.")
+                        st.warning("Não há falhas registradas para este componente. Curva não pôde ser gerada.")
             else:
-                st.error("A planilha carregada não possui as colunas obrigatórias ('SITUAÇÃO DO COMPONENTE' e 'HORAS TRABALHADAS DO COMPONENTE').")
+                st.error("A planilha não possui as colunas 'SITUAÇÃO DO COMPONENTE' e/ou 'HORAS TRABALHADAS DO COMPONENTE'.")
