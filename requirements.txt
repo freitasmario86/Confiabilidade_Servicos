@@ -4,3 +4,5 @@ numpy
 plotly
 scipy
 openpyxl
+openpyxl
+st-gsheets-connection
