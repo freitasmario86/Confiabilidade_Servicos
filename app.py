@@ -91,6 +91,7 @@ with aba_dashboard:
         df_cascaded = apply_cascading_filter(df_cascaded, 'EQUIPAMENTO', 'Equipamento')
         df_cascaded = apply_cascading_filter(df_cascaded, 'TIPO', 'Tipo de OS')
         df_cascaded = apply_cascading_filter(df_cascaded, 'RESPONSABILIDADE NÍVEL 1', 'Responsabilidade N1')
+        df_cascaded = apply_cascading_filter(df_cascaded, 'RESPONSABILIDADE NÍVEL 2', 'Responsabilidade N2') # <-- FILTRO REINSERIDO AQUI
         df_cascaded = apply_cascading_filter(df_cascaded, 'GRUPO', 'Grupo')
         df_cascaded = apply_cascading_filter(df_cascaded, 'SUBGRUPO', 'Subgrupo')
 
@@ -239,7 +240,6 @@ with aba_dashboard:
             alvo_conf = st.selectbox(f"Selecione o {dim_conf.title()} alvo:", opcoes_conf)
             df_conf = df_conf[df_conf[dim_conf] == alvo_conf]
 
-        # Cálculo correto do TBF agrupado por Equipamento (evita TBFs negativos ao cruzar datas de equipamentos diferentes)
         if not df_conf.empty:
             tbf_data = df_conf.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
             tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
@@ -300,7 +300,7 @@ with aba_ia:
     st.header("🧠 Inteligência Artificial & Confiabilidade Avançada")
     if 'corretivas' in locals() and not corretivas.empty:
         
-        # --- 1. MATRIZ DE CRITICIDADE (FMECA) ---
+        # --- MATRIZ DE CRITICIDADE (FMECA) ---
         st.markdown("### 🎯 Matriz de Criticidade (FMECA)")
         fmeca_dim = st.selectbox("Analisar Criticidade por:", ["EQUIPAMENTO", "GRUPO", "SUBGRUPO"])
         df_fmeca = corretivas.groupby(fmeca_dim).agg(Falhas=('OS', 'count'), Severidade=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
@@ -314,7 +314,7 @@ with aba_ia:
                                title=f"Matriz FMECA: Frequência vs Severidade ({fmeca_dim})")
         st.plotly_chart(fig_fmeca, use_container_width=True)
 
-        # --- 2. CURVA DA BANHEIRA ---
+        # --- CURVA DA BANHEIRA E OTIMIZAÇÃO PM ---
         st.markdown("---")
         st.markdown("### 🛁 Curva da Banheira (Diagnóstico de Frota)")
         tbf_data_global = corretivas.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
@@ -339,10 +339,8 @@ with aba_ia:
             fig_haz_g.update_layout(title="Curva da Banheira: Taxa de Falha h(t)", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
             st.plotly_chart(fig_haz_g, use_container_width=True)
 
-            # --- 3. OTIMIZAÇÃO DO INTERVALO DE MANUTENÇÃO PREVENTIVA (PM OPTIMIZATION) ---
             st.markdown("---")
             st.markdown("### 💰 Otimização de Intervalo de Preventiva (Custo Mínimo Esperado)")
-            st.markdown("Se a frota estiver na **Fase de Desgaste ($\beta > 1$)**, é possível calcular o tempo exato para trocar/revisar o equipamento garantindo o menor custo financeiro possível.")
             
             if beta_g > 1:
                 col_c1, col_c2 = st.columns(2)
@@ -356,7 +354,6 @@ with aba_ia:
                     F_t = 1 - R_t
                     integral_R = np.cumsum(R_t) * dt
                     
-                    # Equação de Custo Esperado de Substituição (Modelo de Jardine)
                     C_t = (custo_prev * R_t + custo_corr * F_t) / integral_R
                     min_idx = np.argmin(C_t)
                     optimal_time = t_opt[min_idx]
@@ -365,17 +362,17 @@ with aba_ia:
                     
                     fig_custo = go.Figure(go.Scatter(x=t_opt, y=C_t, mode='lines', name='Custo Esperado C(t)', line=dict(color='blue')))
                     fig_custo.add_vline(x=optimal_time, line_dash="dash", line_color="red", annotation_text="Ponto Ótimo")
-                    fig_custo.update_layout(title="Curva de Custo Esperado por Unidade de Tempo", xaxis_title="Intervalo de Troca/Revisão (Horas)", yaxis_title="Custo R$/Hora")
+                    fig_custo.update_layout(title="Curva de Custo Esperado", xaxis_title="Intervalo de Troca/Revisão (Horas)", yaxis_title="Custo R$/Hora")
                     st.plotly_chart(fig_custo, use_container_width=True)
                 else:
-                    st.warning("O custo da Corretiva deve ser maior que o da Preventiva para justificar a otimização.")
+                    st.warning("O custo da Corretiva deve ser maior que o da Preventiva para a otimização.")
             else:
-                st.warning(f"Como $\\beta = {beta_g:.3f} \le 1$ (Mortalidade Infantil ou Aleatória), manutenções preventivas baseadas no tempo não reduzem falhas. A estratégia correta é atuar na causa raiz ou operar até a quebra (Run-to-Failure).")
+                st.warning(f"Como $\\beta = {beta_g:.3f} \le 1$ (Mortalidade Infantil ou Aleatória), manutenções preventivas baseadas no tempo não reduzem falhas.")
 
         else:
             st.warning("Dados de TBF insuficientes.")
     else:
-        st.info("Carregue a planilha de OS para habilitar a Engenharia de Confiabilidade.")
+        st.info("Carregue a planilha na aba principal para habilitar a IA.")
 
 # =====================================================================
 # ABA 3: PLANO DE AÇÃO 5W2H (Google Sheets Seguro)
@@ -383,28 +380,28 @@ with aba_ia:
 with aba_plano_acao:
     st.header("📋 Plano de Ação 5W2H")
     url_planilha = "https://docs.google.com/spreadsheets/d/1mrfp_qDdX5_6sJVT5-Gk3NzM3nKqznmlR6rwDsXZN2s/edit?gid=0#gid=0"
-    conn = st.connection("gsheets", type=GSheetsConnection)
     colunas_5w2h = ["NOME DO CONTRATO", "What?", "Why?", "Where?", "When?", "Who?", "How?", "How Much?", "Status"]
-
+    
+    df_acao = pd.DataFrame(columns=colunas_5w2h)
+    df_acao.loc[0] = [""] * len(colunas_5w2h)
+    
     try:
-        df_acao = conn.read(spreadsheet=url_planilha)
-        if df_acao.empty or len(df_acao.columns) < 2:
-            df_acao = pd.DataFrame(columns=colunas_5w2h)
-            df_acao.loc[0] = [""] * len(colunas_5w2h)
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df_g = conn.read(spreadsheet=url_planilha)
+        if not df_g.empty and len(df_g.columns) >= 2:
+            df_acao = df_g
     except Exception:
-        df_acao = pd.DataFrame(columns=colunas_5w2h)
-        df_acao.loc[0] = [""] * len(colunas_5w2h)
+        pass 
 
     df_editado = st.data_editor(df_acao, num_rows="dynamic", use_container_width=True)
     
     if st.button("💾 Salvar no Google Sheets"):
-        with st.spinner("Salvando..."):
-            try:
-                conn.update(spreadsheet=url_planilha, data=df_editado)
-                st.success("Dados salvos no Google Sheets com sucesso!")
-            except Exception:
-                st.warning("⚠️ **Autenticação Necessária na Nuvem:** O Streamlit bloqueou a gravação pois a sua Service Account não está configurada nos Secrets. Baixe o plano como backup (CSV) no botão abaixo.")
-                
+        try:
+            conn.update(spreadsheet=url_planilha, data=df_editado)
+            st.success("Dados salvos no Google Sheets com sucesso!")
+        except Exception:
+            st.error("⚠️ **O Streamlit Cloud bloqueou a gravação.** Motivo: Você não configurou as chaves da Conta de Serviço (Service Account JSON) nas configurações de 'Secrets' do App. Baixe o CSV abaixo.")
+            
     csv = df_editado.to_csv(index=False).encode('utf-8')
     st.download_button("📥 Baixar Plano de Ação (CSV Local)", data=csv, file_name='plano_acao_backup.csv', mime='text/csv')
 
@@ -415,9 +412,9 @@ with aba_lda:
     st.header("🛠️ Análise de Dados de Vida (LDA) - Componentes")
     
     if not LIFELINES_INSTALLED:
-        st.error("⚠️ Biblioteca `lifelines` ausente no requirements.txt.")
+        st.error("⚠️ **Atenção:** Biblioteca `lifelines` ausente. Adicione `lifelines` ao `requirements.txt`.")
     else:
-        file_lda = st.file_uploader("Carregue a planilha de Controle de Componentes (Ex: SKT110S & SKT130Pro)", type=["xlsx"], key="lda_uploader")
+        file_lda = st.file_uploader("Carregue a planilha de Controle de Componentes", type=["xlsx"], key="lda_uploader")
         
         if file_lda is not None:
             df_comp_raw = pd.read_excel(file_lda, sheet_name=0)
@@ -467,22 +464,22 @@ with aba_lda:
                         tab_l1, tab_l2, tab_l3 = st.tabs(["Confiabilidade R(t)", "Prob. de Falha F(t)", "Taxa de Falha h(t)"])
                         with tab_l1:
                             fig_l1 = go.Figure()
-                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier'))
-                            fig_l1.add_trace(go.Scatter(x=t_lda, y=wf.survival_function_at_times(t_lda), mode='lines', line=dict(dash='dash', color='red'), name='Weibull'))
-                            fig_l1.update_layout(title="Aderência da Confiabilidade R(t)", xaxis_title="Horas", yaxis_title="R(t)")
+                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier (Real)'))
+                            fig_l1.add_trace(go.Scatter(x=t_lda, y=wf.survival_function_at_times(t_lda), mode='lines', line=dict(dash='dash', color='red'), name='Weibull (Ajuste)'))
+                            fig_l1.update_layout(title="Aderência da Confiabilidade R(t)", xaxis_title="Horas Operacionais", yaxis_title="R(t)", hovermode="x unified")
                             st.plotly_chart(fig_l1, use_container_width=True)
                         with tab_l2:
                             fig_l2 = go.Figure(go.Scatter(x=t_lda, y=wf.cumulative_density_at_times(t_lda), mode='lines', line=dict(color='orange')))
-                            fig_l2.update_layout(title="Probabilidade Acumulada de Falha F(t)", xaxis_title="Horas", yaxis_title="F(t)")
+                            fig_l2.update_layout(title="Probabilidade Acumulada de Falha F(t)", xaxis_title="Horas Operacionais", yaxis_title="F(t)", hovermode="x unified")
                             st.plotly_chart(fig_l2, use_container_width=True)
                         with tab_l3:
                             fig_l3 = go.Figure(go.Scatter(x=t_lda, y=wf.hazard_at_times(t_lda), mode='lines', line=dict(color='purple')))
-                            fig_l3.update_layout(title="Taxa de Falha h(t)", xaxis_title="Horas", yaxis_title="h(t)")
+                            fig_l3.update_layout(title="Taxa de Falha h(t)", xaxis_title="Horas Operacionais", yaxis_title="h(t)", hovermode="x unified")
                             st.plotly_chart(fig_l3, use_container_width=True)
                     else:
                         st.warning("Sem falhas confirmadas. Curvas avançadas não podem ser geradas.")
                 
-                # --- MAPA DE CALOR COM TABELA ---
+                # --- MAPA DE CALOR COM TABELA E CACHE ---
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante da Frota")
                 
