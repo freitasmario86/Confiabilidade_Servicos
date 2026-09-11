@@ -48,43 +48,38 @@ if uploaded_file is not None:
     df['TOTAL HORAS DECIMAIS'] = pd.to_numeric(df['TOTAL HORAS DECIMAIS'], errors='coerce').fillna(0)
     df['TIPO'] = df['TIPO'].astype(str).str.upper().str.strip()
 
-    # --- 3. FILTROS LATERAIS ---
-    st.sidebar.header("Filtros")
+    # --- 3. FILTROS LATERAIS (EM CASCATA) ---
+    st.sidebar.header("Filtros em Cascata")
+    st.sidebar.markdown("*Deixe a caixa vazia para selecionar todos*")
     
     min_date = df['DATA INÍCIO'].min()
     max_date = df['DATA FIM'].max()
     date_range = st.sidebar.date_input("Período", [min_date, max_date])
     
-    def create_filter(col_name, label):
-        if col_name in df.columns:
-            options = df[col_name].dropna().unique().tolist()
-            selected = st.sidebar.multiselect(label, options, default=options)
-            return selected
-        return []
-
-    mod_equip = create_filter('MODELO EQUIPAMENTO', 'Modelo Equipamento')
-    equip = create_filter('EQUIPAMENTO', 'Equipamento')
-    tipo_os = create_filter('TIPO', 'Tipo de OS')
-    resp_n1 = create_filter('RESPONSABILIDADE NÍVEL 1', 'Responsabilidade N1')
-    resp_n2 = create_filter('RESPONSABILIDADE NÍVEL 2', 'Responsabilidade N2')
-    grupo = create_filter('GRUPO', 'Grupo')
-    subgrupo = create_filter('SUBGRUPO', 'Subgrupo')
-
-    # Aplicação de filtros
-    mask = (
-        (df['MODELO EQUIPAMENTO'].isin(mod_equip)) &
-        (df['EQUIPAMENTO'].isin(equip)) &
-        (df['TIPO'].isin(tipo_os)) &
-        (df['RESPONSABILIDADE NÍVEL 1'].isin(resp_n1)) &
-        (df['RESPONSABILIDADE NÍVEL 2'].isin(resp_n2)) &
-        (df['GRUPO'].isin(grupo)) &
-        (df['SUBGRUPO'].isin(subgrupo))
-    )
-    
+    # Aplica o filtro de data primeiro
     if len(date_range) == 2:
-        mask = mask & (df['DATA INÍCIO'].dt.date >= date_range[0]) & (df['DATA INÍCIO'].dt.date <= date_range[1])
-        
-    df_filtered = df[mask]
+        df_filtered = df[(df['DATA INÍCIO'].dt.date >= date_range[0]) & (df['DATA INÍCIO'].dt.date <= date_range[1])]
+    else:
+        df_filtered = df.copy()
+
+    # Função para aplicar filtros em cascata (comportamento de "vazio = todos")
+    def apply_cascading_filter(df_in, col_name, label):
+        if col_name in df_in.columns:
+            options = df_in[col_name].dropna().astype(str).unique().tolist()
+            options.sort()
+            selected = st.sidebar.multiselect(label, options, default=[])
+            if len(selected) > 0:
+                df_in = df_in[df_in[col_name].astype(str).isin(selected)]
+        return df_in
+
+    # Aplicação passo a passo para gerar o efeito cascata
+    df_filtered = apply_cascading_filter(df_filtered, 'MODELO EQUIPAMENTO', 'Modelo Equipamento')
+    df_filtered = apply_cascading_filter(df_filtered, 'EQUIPAMENTO', 'Equipamento')
+    df_filtered = apply_cascading_filter(df_filtered, 'TIPO', 'Tipo de OS')
+    df_filtered = apply_cascading_filter(df_filtered, 'RESPONSABILIDADE NÍVEL 1', 'Responsabilidade N1')
+    df_filtered = apply_cascading_filter(df_filtered, 'RESPONSABILIDADE NÍVEL 2', 'Responsabilidade N2')
+    df_filtered = apply_cascading_filter(df_filtered, 'GRUPO', 'Grupo')
+    df_filtered = apply_cascading_filter(df_filtered, 'SUBGRUPO', 'Subgrupo')
 
     # --- 4. KPIs BÁSICOS ---
     st.markdown("---")
@@ -114,7 +109,7 @@ if uploaded_file is not None:
 
     # --- 5. RESPONSABILIDADE N1 ---
     st.markdown("### 👥 Responsabilidade Nível 1 (%)")
-    if 'RESPONSABILIDADE NÍVEL 1' in df_filtered.columns:
+    if 'RESPONSABILIDADE NÍVEL 1' in df_filtered.columns and not df_filtered.empty:
         resp_counts = df_filtered['RESPONSABILIDADE NÍVEL 1'].value_counts(normalize=True).reset_index()
         resp_counts.columns = ['Responsabilidade', 'Porcentagem']
         resp_counts['Porcentagem'] = resp_counts['Porcentagem'] * 100
@@ -127,7 +122,7 @@ if uploaded_file is not None:
 
     # --- 6. MTBF, MTTR E JACK-KNIFE POR EQUIPAMENTO ---
     st.markdown("---")
-    st.markdown("### 🚜 Análise por Equipamento")
+    st.markdown("### 🚜 Análise por Equipamento e Gráfico de Jack-Knife")
     
     if not corretivas.empty:
         equip_stats = corretivas.groupby('EQUIPAMENTO').agg(
@@ -140,31 +135,56 @@ if uploaded_file is not None:
         equip_stats['MTBF'] = (equip_stats['Horas Disponiveis'] - equip_stats['Downtime']) / equip_stats['Falhas']
         equip_stats['MTBF'] = equip_stats['MTBF'].apply(lambda x: x if x > 0 else 0)
 
-        tab_eq1, tab_eq2, tab_eq3 = st.tabs(["MTBF por Equipamento", "MTTR por Equipamento", "Gráfico de Jack-Knife"])
+        tab_eq1, tab_eq2, tab_eq3 = st.tabs(["Gráfico de Jack-Knife", "MTBF por Equipamento", "MTTR por Equipamento"])
         
         with tab_eq1:
+            mean_falhas = equip_stats['Falhas'].mean()
+            mean_mttr = equip_stats['MTTR'].mean()
+            max_f = equip_stats['Falhas'].max() * 1.1 if not equip_stats.empty else 1
+            max_m = equip_stats['MTTR'].max() * 1.1 if not equip_stats.empty else 1
+            
+            fig_jk = px.scatter(equip_stats, x='Falhas', y='MTTR', text='EQUIPAMENTO', size='Downtime',
+                                title='Jack-Knife: Frequência de Falhas vs MTTR (Tamanho da bolha = Horas Paradas)',
+                                labels={'Falhas': 'Número de Falhas', 'MTTR': 'MTTR (Horas)'})
+            
+            # Adicionando cores aos quadrantes
+            # Q4 - Inferior Esquerdo (Verde)
+            fig_jk.add_shape(type="rect", x0=0, y0=0, x1=mean_falhas, y1=mean_mttr, fillcolor="lightgreen", opacity=0.2, layer="below", line_width=0)
+            # Q3 - Inferior Direito (Amarelo)
+            fig_jk.add_shape(type="rect", x0=mean_falhas, y0=0, x1=max_f, y1=mean_mttr, fillcolor="yellow", opacity=0.2, layer="below", line_width=0)
+            # Q2 - Superior Esquerdo (Laranja)
+            fig_jk.add_shape(type="rect", x0=0, y0=mean_mttr, x1=mean_falhas, y1=max_m, fillcolor="orange", opacity=0.2, layer="below", line_width=0)
+            # Q1 - Superior Direito (Vermelho)
+            fig_jk.add_shape(type="rect", x0=mean_falhas, y0=mean_mttr, x1=max_f, y1=max_m, fillcolor="red", opacity=0.2, layer="below", line_width=0)
+
+            fig_jk.add_vline(x=mean_falhas, line_dash="dash", line_color="black", annotation_text="Média de Falhas")
+            fig_jk.add_hline(y=mean_mttr, line_dash="dash", line_color="black", annotation_text="MTTR Médio")
+            
+            fig_jk.update_traces(textposition='top center')
+            fig_jk.update_xaxes(range=[0, max_f])
+            fig_jk.update_yaxes(range=[0, max_m])
+            st.plotly_chart(fig_jk, use_container_width=True)
+            
+            # Legendas do Jack-Knife
+            st.markdown("""
+            **Explicação dos Quadrantes (Jack-Knife):**
+            * 🔴 **Quadrante Superior Direito (Vermelho - Crítico):** Alta frequência de falhas e alto tempo de reparo (MTTR). **Ação:** Prioridade máxima. Requer redesenho de componentes, substituição do equipamento ou grande revisão do plano de manutenção.
+            * 🟠 **Quadrante Superior Esquerdo (Laranja - Crônico):** Baixa frequência de falhas, mas quando quebra, demora muito para consertar (Alto MTTR). **Ação:** Melhorar a manutenibilidade, investir em treinamento da equipe técnica, melhorar as ferramentas de trabalho ou garantir peças críticas no estoque.
+            * 🟡 **Quadrante Inferior Direito (Amarelo - Agudo/Repetitivo):** Quebra muito, mas o conserto é rápido (Baixo MTTR). **Ação:** Investigar a causa raiz (falha de pequenos componentes sensíveis, erro operacional) para aumentar a confiabilidade e evitar as micro-paradas constantes.
+            * 🟢 **Quadrante Inferior Esquerdo (Verde - Normal):** Baixa frequência de falhas e reparo rápido. **Ação:** Equipamento sob controle operacional. Apenas manter as estratégias atuais de manutenção preventiva/inspeção.
+            """)
+
+        with tab_eq2:
             fig_mtbf = px.bar(equip_stats.sort_values('MTBF', ascending=False), x='EQUIPAMENTO', y='MTBF', 
                               text=equip_stats['MTBF'].round(1), title="MTBF por Equipamento (Horas)")
             fig_mtbf.update_traces(textposition='outside')
             st.plotly_chart(fig_mtbf, use_container_width=True)
             
-        with tab_eq2:
+        with tab_eq3:
             fig_mttr = px.bar(equip_stats.sort_values('MTTR', ascending=False), x='EQUIPAMENTO', y='MTTR', 
                               text=equip_stats['MTTR'].round(1), title="MTTR por Equipamento (Horas)", color_discrete_sequence=['indianred'])
             fig_mttr.update_traces(textposition='outside')
             st.plotly_chart(fig_mttr, use_container_width=True)
-
-        with tab_eq3:
-            mean_falhas = equip_stats['Falhas'].mean()
-            mean_mttr = equip_stats['MTTR'].mean()
-            
-            fig_jk = px.scatter(equip_stats, x='Falhas', y='MTTR', text='EQUIPAMENTO', size='Downtime',
-                                title='Jack-Knife: Frequência de Falhas vs MTTR (Tamanho da bolha = Downtime)',
-                                labels={'Falhas': 'Número de Falhas', 'MTTR': 'MTTR (Horas)'})
-            fig_jk.add_vline(x=mean_falhas, line_dash="dash", line_color="gray", annotation_text="Média de Falhas")
-            fig_jk.add_hline(y=mean_mttr, line_dash="dash", line_color="gray", annotation_text="MTTR Médio")
-            fig_jk.update_traces(textposition='top center')
-            st.plotly_chart(fig_jk, use_container_width=True)
 
     # --- 7. PERFIL DE PERDAS (PARETO TOP 18) ---
     st.markdown("---")
@@ -173,7 +193,7 @@ if uploaded_file is not None:
     
     def plot_pareto(data, col_name, title):
         df_pareto = data.groupby(col_name)['TOTAL HORAS DECIMAIS'].sum().reset_index()
-        df_pareto = df_pareto.sort_values(by='TOTAL HORAS DECIMAIS', ascending=False).head(18) # Limite ao TOP 18
+        df_pareto = df_pareto.sort_values(by='TOTAL HORAS DECIMAIS', ascending=False).head(18)
         
         if df_pareto.empty:
             return go.Figure()
@@ -202,7 +222,7 @@ if uploaded_file is not None:
     with tab_p3:
         st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Pareto por Subgrupo (Top 18)'), use_container_width=True)
 
-    # --- 8. ANÁLISE DE CONFIABILIDADE (MELHOR DISTRIBUIÇÃO) E RGA ---
+    # --- 8. ANÁLISE DE CONFIABILIDADE E DISTRIBUIÇÕES ---
     st.markdown("---")
     st.markdown("### 📈 Confiabilidade e Probabilidade de Falha")
     
@@ -213,7 +233,7 @@ if uploaded_file is not None:
         tbf_clean = tbf_clean[tbf_clean > 0].values
 
         if len(tbf_clean) > 3:
-            # Seleção da melhor distribuição (SSE - Sum of Squared Errors)
+            # Seleção da melhor distribuição (Menor Erro Quadrático - SSE)
             y_hist, x_hist = np.histogram(tbf_clean, bins='auto', density=True)
             x_mids = (x_hist + np.roll(x_hist, -1))[:-1] / 2.0
 
@@ -241,7 +261,7 @@ if uploaded_file is not None:
                     best_name = name
                     best_params = params
 
-            st.success(f"**Melhor distribuição estatística encontrada:** {best_name} (Aderência com base no menor Erro Quadrático)")
+            st.success(f"**Melhor distribuição estatística encontrada:** {best_name} (Aderência baseada no menor erro)")
 
             # Calcular as curvas baseadas na melhor distribuição
             t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
@@ -254,7 +274,7 @@ if uploaded_file is not None:
             prob_failure = dist_obj.cdf(t, loc=loc, scale=scale, *arg) # F(t)
             pdf_vals = dist_obj.pdf(t, loc=loc, scale=scale, *arg) # f(t)
             hazard_rate = pdf_vals / reliability # h(t) = f(t)/R(t)
-            hazard_rate[np.isinf(hazard_rate)] = 0 # Evitar divisões por zero
+            hazard_rate[np.isinf(hazard_rate)] = 0
 
             tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade de Falha F(t)", "Taxa de Falha h(t)", "RGA (Crescimento)"])
 
@@ -266,19 +286,19 @@ if uploaded_file is not None:
             with tab_r1:
                 fig_rel = go.Figure()
                 fig_rel.add_trace(go.Scatter(x=t, y=reliability, mode='lines', name='Confiabilidade', line=dict(color='green')))
-                fig_rel.update_layout(title=f"Curva de Confiabilidade R(t) - {best_name}", xaxis_title="Tempo (Horas)", yaxis_title="Probabilidade")
+                fig_rel.update_layout(title=f"Curva de Confiabilidade R(t) - {best_name}", xaxis_title="Tempo Operacional (Horas)", yaxis_title="Probabilidade (0 a 1)")
                 st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
 
             with tab_r2:
                 fig_prob = go.Figure()
-                fig_prob.add_trace(go.Scatter(x=t, y=prob_failure, mode='lines', name='Prob. Falha', line=dict(color='red')))
-                fig_prob.update_layout(title=f"Probabilidade de Falha F(t) - {best_name}", xaxis_title="Tempo (Horas)", yaxis_title="Probabilidade")
+                fig_prob.add_trace(go.Scatter(x=t, y=prob_failure, mode='lines', name='Probabilidade Acumulada', line=dict(color='red')))
+                fig_prob.update_layout(title=f"Probabilidade de Falha F(t) - {best_name}", xaxis_title="Tempo Operacional (Horas)", yaxis_title="Probabilidade (0 a 1)")
                 st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
 
             with tab_r3:
                 fig_haz = go.Figure()
-                fig_haz.add_trace(go.Scatter(x=t, y=hazard_rate, mode='lines', name='Taxa de Falha', line=dict(color='orange')))
-                fig_haz.update_layout(title=f"Taxa de Falha h(t) - {best_name}", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
+                fig_haz.add_trace(go.Scatter(x=t, y=hazard_rate, mode='lines', name='Taxa (h(t))', line=dict(color='orange')))
+                fig_haz.update_layout(title=f"Taxa de Falha h(t) - {best_name}", xaxis_title="Tempo Operacional (Horas)", yaxis_title="Falhas por Hora")
                 st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
 
             with tab_r4:
@@ -292,7 +312,7 @@ if uploaded_file is not None:
         else:
             st.warning("Dados de TBF insuficientes (valores positivos).")
     else:
-        st.info("São necessárias mais ocorrências corretivas para gerar análises de distribuição.")
+        st.info("São necessárias mais ocorrências corretivas para gerar análises de distribuição e confiabilidade de forma precisa.")
 
 else:
     st.info("Por favor, faça o upload de uma planilha Excel na barra lateral.")
