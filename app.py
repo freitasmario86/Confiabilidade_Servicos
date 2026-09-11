@@ -6,17 +6,8 @@ import plotly.graph_objects as go
 import scipy.stats as st_scipy
 from scipy.special import gamma
 import io
-import os
-import tempfile
-import unicodedata
 import warnings
 from streamlit_gsheets import GSheetsConnection
-
-try:
-    from fpdf import FPDF
-    FPDF_INSTALLED = True
-except ImportError:
-    FPDF_INSTALLED = False
 
 try:
     from lifelines import WeibullFitter, KaplanMeierFitter
@@ -133,7 +124,6 @@ with aba_dashboard:
         # --- EVOLUÇÃO MENSAL E RESPONSABILIDADE ---
         st.markdown("---")
         col_evol, col_resp = st.columns([2, 1])
-        fig_evol = go.Figure()
         
         with col_evol:
             st.markdown("### 📅 Evolução Mensal Histórica (MTBF e MTTR)")
@@ -147,6 +137,7 @@ with aba_dashboard:
                 evol_stats['MTBF'] = ((730 * qtd_equip_evol) - evol_stats['Downtime']) / evol_stats['Falhas']
                 evol_stats['MTBF'] = evol_stats['MTBF'].apply(lambda x: x if x > 0 else 0)
                 
+                fig_evol = go.Figure()
                 fig_evol.add_trace(go.Scatter(x=evol_stats['Ano-Mês'], y=evol_stats['MTBF'], mode='lines+markers', name='MTBF (Horas)', line=dict(color='green')))
                 fig_evol.add_trace(go.Scatter(x=evol_stats['Ano-Mês'], y=evol_stats['MTTR'], mode='lines+markers', name='MTTR (Horas)', yaxis='y2', line=dict(color='red')))
                 fig_evol.update_layout(yaxis=dict(title="MTBF"), yaxis2=dict(title="MTTR", overlaying='y', side='right'), hovermode="x unified")
@@ -167,8 +158,6 @@ with aba_dashboard:
         st.markdown("### 🚜 Análise Dinâmica: MTBF, MTTR e Jack-Knife")
         dimensao = st.radio("Selecione a Dimensão de Análise:", ["EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
         
-        fig_jk = go.Figure()
-        
         if not corretivas.empty and dimensao in corretivas.columns:
             dim_stats = corretivas.groupby(dimensao).agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
             equip_count = df_filtered.groupby(dimensao)['EQUIPAMENTO'].nunique().reset_index(name='Qtd_Equip')
@@ -187,11 +176,11 @@ with aba_dashboard:
                 max_f = dim_stats['Falhas'].max() * 1.1 if not dim_stats.empty else 1
                 max_m = dim_stats['MTTR'].max() * 1.1 if not dim_stats.empty else 1
                 
-                # Gráfico limpo (textos no cursor)
-                fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', hover_name=dimensao, size='Downtime',
+                # Rótulos ativados e organizados
+                fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', text=dimensao, size='Downtime',
                                     title=f'Jack-Knife ({dimensao.title()})', opacity=0.8)
                 
-                fig_jk.update_traces(textposition='top center', textfont=dict(size=10, color='black'), cliponaxis=False)
+                fig_jk.update_traces(textposition='top center', textfont=dict(size=11, color='black'), cliponaxis=False)
                 
                 fig_jk.add_shape(type="rect", x0=0, y0=0, x1=mean_falhas, y1=mean_mttr, fillcolor="lightgreen", opacity=0.2, layer="below", line_width=0)
                 fig_jk.add_shape(type="rect", x0=mean_falhas, y0=0, x1=max_f, y1=mean_mttr, fillcolor="yellow", opacity=0.2, layer="below", line_width=0)
@@ -203,13 +192,6 @@ with aba_dashboard:
                 fig_jk.update_xaxes(range=[0, max_f], title_text="Número de Falhas")
                 fig_jk.update_yaxes(range=[0, max_m], title_text="MTTR (Horas)")
                 st.plotly_chart(fig_jk, use_container_width=True)
-                
-                st.markdown("""
-                * 🔴 **Vermelho (Crítico):** Alta frequência + Alto tempo de reparo. Ação: Redesenho/Substituição.
-                * 🟠 **Laranja (Crônico):** Baixa frequência + Alto MTTR. Ação: Treinamento, ferramentas, estoque de peças.
-                * 🟡 **Amarelo (Repetitivo):** Quebra muito + Conserto rápido. Ação: Investigar causa raiz (micro-paradas).
-                * 🟢 **Verde (Normal):** Sob controle operacional.
-                """)
 
             with tab_eq2:
                 fig_mtbf = px.bar(dim_stats.sort_values('MTBF', ascending=False), x=dimensao, y='MTBF', text=dim_stats['MTBF'].round(1), title=f"MTBF por {dimensao.title()}")
@@ -301,60 +283,8 @@ with aba_dashboard:
     else:
         st.info("Por favor, faça o upload da planilha Excel para iniciar o Dashboard.")
 
-    # --- EMISSÃO DE PDF ---
-    if uploaded_file is not None and not corretivas.empty:
-        st.markdown("---")
-        with st.expander("📄 Gerar Relatório PDF (Estratégico, Tático e Operacional)", expanded=False):
-            st.markdown("Selecione os módulos que deseja exportar. *Lembre-se de adicionar `kaleido==0.1.0.post1` no seu requirements.txt para a nuvem.*")
-            ck_est = st.checkbox("Nível Estratégico (KPIs e Evolução Mensal)", value=True)
-            ck_tac = st.checkbox("Nível Tático (Pareto de Ofensores)", value=True)
-            ck_ope = st.checkbox("Nível Operacional (Jack-Knife Críticos)", value=True)
-            
-            if st.button("Gerar PDF"):
-                if not FPDF_INSTALLED:
-                    st.error("Biblioteca 'fpdf' não instalada no servidor. Adicione ao requirements.txt.")
-                else:
-                    with st.spinner("Gerando PDF... Aguarde alguns segundos."):
-                        try:
-                            pdf = FPDF()
-                            pdf.add_page()
-                            pdf.set_font("Arial", 'B', 16)
-                            pdf.cell(0, 10, "Relatorio de Manutencao CIM", ln=True, align='C')
-                            pdf.ln(5)
-                            
-                            if ck_est:
-                                pdf.set_font("Arial", 'B', 14)
-                                pdf.cell(0, 10, "1. Nivel Estrategico - KPIs Globais", ln=True)
-                                pdf.set_font("Arial", '', 11)
-                                pdf.cell(0, 8, f"MTBF: {mtbf:.2f} h | MTTR: {mttr:.2f} h | Corretivas: {perc_corr:.1f}% | Preventivas: {perc_prev:.1f}%", ln=True)
-                                
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp1:
-                                    fig_evol.write_image(tmp1.name, format="png", width=800, height=400)
-                                    pdf.image(tmp1.name, w=190)
-                                os.remove(tmp1.name)
-                                
-                            if ck_tac:
-                                pdf.ln(5)
-                                pdf.set_font("Arial", 'B', 14)
-                                pdf.cell(0, 10, "2. Nivel Tatico - Pareto Top Ofensores", ln=True)
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp2:
-                                    fig_pareto_equip.write_image(tmp2.name, format="png", width=800, height=400)
-                                    pdf.image(tmp2.name, w=190)
-                                os.remove(tmp2.name)
-                                
-                            if ck_ope:
-                                pdf.add_page()
-                                pdf.set_font("Arial", 'B', 14)
-                                pdf.cell(0, 10, f"3. Nivel Operacional - Jack-Knife ({dimensao})", ln=True)
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp3:
-                                    fig_jk.write_image(tmp3.name, format="png", width=800, height=500)
-                                    pdf.image(tmp3.name, w=190)
-                                os.remove(tmp3.name)
-
-                            pdf_bytes = pdf.output(dest="S").encode("latin-1")
-                            st.download_button(label="📥 Baixar Relatório PDF", data=pdf_bytes, file_name="Relatorio_Manutencao.pdf", mime="application/pdf")
-                        except Exception as e:
-                            st.error(f"Erro ao gerar gráficos estáticos. Isso normalmente ocorre por falha do pacote 'kaleido' no ambiente Cloud. Certifique-se de usar a versão 0.1.0.post1. Erro Técnico: {str(e)}")
+    st.markdown("---")
+    st.markdown("💡 **Como gerar o Relatório PDF:** Para evitar lentidão e erros no servidor Cloud, utilize a função nativa do seu navegador. Recolha a barra lateral esquerda e pressione **Ctrl + P** (ou Cmd + P). Selecione 'Salvar como PDF'. Todos os gráficos interativos serão impressos em alta qualidade.")
 
 # =====================================================================
 # ABA 2: PLANO DE AÇÃO 5W2H (Google Sheets)
@@ -396,10 +326,10 @@ with aba_plano_acao:
                 conn.update(spreadsheet=url_planilha, data=df_editado)
                 st.success("Dados salvos no Google Sheets com sucesso!")
             except Exception:
-                st.error("⚠️ **Autenticação Necessária na Nuvem:** O Streamlit bloqueou a gravação pois a sua Service Account não está configurada nos Secrets. Baixe o plano como backup.")
+                st.warning("⚠️ **Autenticação Necessária na Nuvem:** O Streamlit bloqueou a gravação pois a sua Service Account não está configurada nos Secrets. Baixe o plano como backup.")
                 
     st.markdown("---")
-    st.markdown("💡 **Plano B:** Caso as credenciais do Google Sheets não estejam configuradas na nuvem, faça o download.")
+    st.markdown("💡 **Plano B:** Caso as credenciais do Google Sheets não estejam configuradas na nuvem, faça o download do CSV.")
     csv = df_editado.to_csv(index=False).encode('utf-8')
     st.download_button(label="📥 Baixar Plano de Ação (CSV Local)", data=csv, file_name='plano_acao_backup.csv', mime='text/csv')
 
@@ -440,7 +370,6 @@ with aba_lda:
                     falhas_count = df_alvo['Status_LDA'].sum()
                     susp_count = len(df_alvo) - falhas_count
                     
-                    # --- TABELA RESUMO ---
                     st.markdown("### 📋 Tabela Resumo do Componente")
                     cols_to_show = ['MODELO', 'TAG', 'COMPONENTE', 'SITUAÇÃO DO COMPONENTE', 'Horas_LDA']
                     cols_exist = [c for c in cols_to_show if c in df_alvo.columns]
@@ -487,7 +416,7 @@ with aba_lda:
                     else:
                         st.warning("Não há falhas registradas. Não é possível calcular os parâmetros estatísticos de vida.")
                 
-                # --- MAPA DE CALOR COM FILTROS ---
+                # --- MAPA DE CALOR COM FILTROS E TABELA DE VIDA ÚTIL ---
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante da Frota")
                 
@@ -527,7 +456,6 @@ with aba_lda:
                         comps_heatmap = df_ativos['COMPONENTE'].unique().tolist()
                         selecao_comps = st.multiselect("Selecione os Componentes para exibir:", comps_heatmap, default=comps_heatmap)
 
-                    # Filtragem aplicada ao Heatmap
                     df_heat_filtered = df_ativos[
                         (df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & 
                         (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) &
@@ -546,6 +474,13 @@ with aba_lda:
                         )
                         fig_heat.update_layout(coloraxis_colorbar=dict(title="% Consumida", thicknessmode="pixels", thickness=15))
                         st.plotly_chart(fig_heat, use_container_width=True)
+                        
+                        # Tabela de Vida Útil (MTTF) abaixo do mapa
+                        st.markdown("#### 🕒 Tabela de Vida Útil (MTTF Estimado)")
+                        df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
+                        df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
+                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
+                        st.dataframe(df_mttf_display, use_container_width=True)
                     else:
                         st.warning("Nenhum dado encontrado para os filtros selecionados.")
                 else:
