@@ -187,8 +187,11 @@ with aba_dashboard:
                 max_f = dim_stats['Falhas'].max() * 1.1 if not dim_stats.empty else 1
                 max_m = dim_stats['MTTR'].max() * 1.1 if not dim_stats.empty else 1
                 
+                # Gráfico limpo (textos no cursor)
                 fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', hover_name=dimensao, size='Downtime',
                                     title=f'Jack-Knife ({dimensao.title()})', opacity=0.8)
+                
+                fig_jk.update_traces(textposition='top center', textfont=dict(size=10, color='black'), cliponaxis=False)
                 
                 fig_jk.add_shape(type="rect", x0=0, y0=0, x1=mean_falhas, y1=mean_mttr, fillcolor="lightgreen", opacity=0.2, layer="below", line_width=0)
                 fig_jk.add_shape(type="rect", x0=mean_falhas, y0=0, x1=max_f, y1=mean_mttr, fillcolor="yellow", opacity=0.2, layer="below", line_width=0)
@@ -200,6 +203,13 @@ with aba_dashboard:
                 fig_jk.update_xaxes(range=[0, max_f], title_text="Número de Falhas")
                 fig_jk.update_yaxes(range=[0, max_m], title_text="MTTR (Horas)")
                 st.plotly_chart(fig_jk, use_container_width=True)
+                
+                st.markdown("""
+                * 🔴 **Vermelho (Crítico):** Alta frequência + Alto tempo de reparo. Ação: Redesenho/Substituição.
+                * 🟠 **Laranja (Crônico):** Baixa frequência + Alto MTTR. Ação: Treinamento, ferramentas, estoque de peças.
+                * 🟡 **Amarelo (Repetitivo):** Quebra muito + Conserto rápido. Ação: Investigar causa raiz (micro-paradas).
+                * 🟢 **Verde (Normal):** Sob controle operacional.
+                """)
 
             with tab_eq2:
                 fig_mtbf = px.bar(dim_stats.sort_values('MTBF', ascending=False), x=dimensao, y='MTBF', text=dim_stats['MTBF'].round(1), title=f"MTBF por {dimensao.title()}")
@@ -295,14 +305,14 @@ with aba_dashboard:
     if uploaded_file is not None and not corretivas.empty:
         st.markdown("---")
         with st.expander("📄 Gerar Relatório PDF (Estratégico, Tático e Operacional)", expanded=False):
-            st.markdown("Selecione os módulos que deseja exportar. *Requer tempo de processamento para renderizar as imagens.*")
+            st.markdown("Selecione os módulos que deseja exportar. *Lembre-se de adicionar `kaleido==0.1.0.post1` no seu requirements.txt para a nuvem.*")
             ck_est = st.checkbox("Nível Estratégico (KPIs e Evolução Mensal)", value=True)
             ck_tac = st.checkbox("Nível Tático (Pareto de Ofensores)", value=True)
             ck_ope = st.checkbox("Nível Operacional (Jack-Knife Críticos)", value=True)
             
             if st.button("Gerar PDF"):
                 if not FPDF_INSTALLED:
-                    st.error("Biblioteca 'fpdf' ou 'kaleido' não instalada no servidor. Adicione ao requirements.txt.")
+                    st.error("Biblioteca 'fpdf' não instalada no servidor. Adicione ao requirements.txt.")
                 else:
                     with st.spinner("Gerando PDF... Aguarde alguns segundos."):
                         try:
@@ -319,7 +329,6 @@ with aba_dashboard:
                                 pdf.cell(0, 8, f"MTBF: {mtbf:.2f} h | MTTR: {mttr:.2f} h | Corretivas: {perc_corr:.1f}% | Preventivas: {perc_prev:.1f}%", ln=True)
                                 
                                 with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp1:
-                                    # Removido o argumento 'engine' para evitar o erro no Streamlit Cloud
                                     fig_evol.write_image(tmp1.name, format="png", width=800, height=400)
                                     pdf.image(tmp1.name, w=190)
                                 os.remove(tmp1.name)
@@ -345,7 +354,7 @@ with aba_dashboard:
                             pdf_bytes = pdf.output(dest="S").encode("latin-1")
                             st.download_button(label="📥 Baixar Relatório PDF", data=pdf_bytes, file_name="Relatorio_Manutencao.pdf", mime="application/pdf")
                         except Exception as e:
-                            st.error(f"Erro ao gerar gráficos estáticos. Verifique se o pacote 'kaleido' está instalado. Erro: {str(e)}")
+                            st.error(f"Erro ao gerar gráficos estáticos. Isso normalmente ocorre por falha do pacote 'kaleido' no ambiente Cloud. Certifique-se de usar a versão 0.1.0.post1. Erro Técnico: {str(e)}")
 
 # =====================================================================
 # ABA 2: PLANO DE AÇÃO 5W2H (Google Sheets)
@@ -366,7 +375,6 @@ with aba_plano_acao:
         df_acao = conn.read(spreadsheet=url_planilha)
         if df_acao.empty or len(df_acao.columns) < 2:
             df_acao = pd.DataFrame(columns=colunas_5w2h)
-            # Adiciona uma linha em branco para evitar o "None" visualmente
             df_acao.loc[0] = [""] * len(colunas_5w2h)
     except Exception:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
@@ -388,10 +396,10 @@ with aba_plano_acao:
                 conn.update(spreadsheet=url_planilha, data=df_editado)
                 st.success("Dados salvos no Google Sheets com sucesso!")
             except Exception:
-                st.error("⚠️ **Falta de Permissão na Nuvem:** O Streamlit Cloud bloqueou a gravação pois a Service Account não está configurada nos 'Secrets'.")
+                st.error("⚠️ **Autenticação Necessária na Nuvem:** O Streamlit bloqueou a gravação pois a sua Service Account não está configurada nos Secrets. Baixe o plano como backup.")
                 
     st.markdown("---")
-    st.markdown("💡 **Dica (Plano B):** Se não for possível salvar na nuvem, você pode baixar suas edições como CSV a qualquer momento.")
+    st.markdown("💡 **Plano B:** Caso as credenciais do Google Sheets não estejam configuradas na nuvem, faça o download.")
     csv = df_editado.to_csv(index=False).encode('utf-8')
     st.download_button(label="📥 Baixar Plano de Ação (CSV Local)", data=csv, file_name='plano_acao_backup.csv', mime='text/csv')
 
@@ -412,6 +420,7 @@ with aba_lda:
             
             if 'SITUAÇÃO DO COMPONENTE' in df_comp.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp.columns:
                 
+                # Filtro de MODELO
                 if 'MODELO' in df_comp.columns:
                     modelos_disp = df_comp['MODELO'].dropna().astype(str).unique().tolist()
                     modelo_alvo = st.multiselect("Filtre pelo Modelo:", modelos_disp, default=modelos_disp)
@@ -419,7 +428,6 @@ with aba_lda:
                         df_comp = df_comp[df_comp['MODELO'].astype(str).isin(modelo_alvo)]
                 
                 df_comp['Status_LDA'] = df_comp['SITUAÇÃO DO COMPONENTE'].apply(lambda x: 1 if isinstance(x, str) and 'falhou' in x.lower() else 0)
-                # Correção do KeyError: Usando a mesma variável exata
                 df_comp['Horas_LDA'] = pd.to_numeric(df_comp['HORAS TRABALHADAS DO COMPONENTE'], errors='coerce')
                 
                 componentes_disp = df_comp['COMPONENTE'].dropna().unique().tolist()
@@ -432,11 +440,10 @@ with aba_lda:
                     falhas_count = df_alvo['Status_LDA'].sum()
                     susp_count = len(df_alvo) - falhas_count
                     
-                    # --- TABELA RESUMO (Correção do Case-Sensitive) ---
+                    # --- TABELA RESUMO ---
                     st.markdown("### 📋 Tabela Resumo do Componente")
                     cols_to_show = ['MODELO', 'TAG', 'COMPONENTE', 'SITUAÇÃO DO COMPONENTE', 'Horas_LDA']
                     cols_exist = [c for c in cols_to_show if c in df_alvo.columns]
-                    # Ordenando corretamente pelo nome da coluna em minúsculo
                     st.dataframe(df_alvo[cols_exist].sort_values('Horas_LDA', ascending=False), use_container_width=True)
                     
                     st.write(f"**Amostras no DataSet:** {len(df_alvo)} | **Falhas (Eventos):** {falhas_count} | **Censuras (Em Operação):** {susp_count}")
@@ -480,7 +487,7 @@ with aba_lda:
                     else:
                         st.warning("Não há falhas registradas. Não é possível calcular os parâmetros estatísticos de vida.")
                 
-                # --- MAPA DE CALOR: VIDA ÚTIL ---
+                # --- MAPA DE CALOR COM FILTROS ---
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante da Frota")
                 
@@ -504,18 +511,43 @@ with aba_lda:
                     df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
                     df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
                     
-                    heatmap_data = df_ativos.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
+                    st.markdown("#### Filtros do Mapa de Calor")
+                    col_f1, col_f2 = st.columns(2)
                     
-                    fig_heat = px.imshow(
-                        heatmap_data, 
-                        text_auto=".1f", 
-                        aspect="auto", 
-                        color_continuous_scale="RdYlGn_r",
-                        title="Mapa de Calor: Porcentagem (%) do MTTF Consumida (Ativos)",
-                        labels=dict(color="% Consumida")
-                    )
-                    st.plotly_chart(fig_heat, use_container_width=True)
-                    st.markdown("*Nota: Cores avermelhadas indicam componentes que estão se aproximando ou ultrapassaram seu MTTF calculado e requerem atenção.*")
+                    with col_f1:
+                        max_vida = float(df_ativos['Vida_Consumida_%'].max()) if not df_ativos.empty else 100.0
+                        faixa_vida = st.slider(
+                            "Selecione a faixa de % de Vida Consumida:", 
+                            min_value=0.0, 
+                            max_value=max(200.0, max_vida), 
+                            value=(0.0, max(100.0, max_vida))
+                        )
+                    
+                    with col_f2:
+                        comps_heatmap = df_ativos['COMPONENTE'].unique().tolist()
+                        selecao_comps = st.multiselect("Selecione os Componentes para exibir:", comps_heatmap, default=comps_heatmap)
+
+                    # Filtragem aplicada ao Heatmap
+                    df_heat_filtered = df_ativos[
+                        (df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & 
+                        (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) &
+                        (df_ativos['COMPONENTE'].isin(selecao_comps))
+                    ]
+
+                    if not df_heat_filtered.empty:
+                        heatmap_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
+                        
+                        fig_heat = px.imshow(
+                            heatmap_data, 
+                            text_auto=".1f", 
+                            aspect="auto", 
+                            color_continuous_scale="RdYlGn_r",
+                            title="Mapa de Calor: Porcentagem (%) do MTTF Consumida",
+                        )
+                        fig_heat.update_layout(coloraxis_colorbar=dict(title="% Consumida", thicknessmode="pixels", thickness=15))
+                        st.plotly_chart(fig_heat, use_container_width=True)
+                    else:
+                        st.warning("Nenhum dado encontrado para os filtros selecionados.")
                 else:
                     st.info("É necessário haver falhas computadas nos componentes para determinar o MTTF e compará-los com as peças ativas no mapa de calor.")
 
