@@ -15,13 +15,21 @@ try:
 except ImportError:
     LIFELINES_INSTALLED = False
 
+try:
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.preprocessing import LabelEncoder
+    SKLEARN_INSTALLED = True
+except ImportError:
+    SKLEARN_INSTALLED = False
+
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Dashboard de Manutenção CIM", layout="wide", page_icon="⚙️")
 
 # --- NAVEGAÇÃO POR ABAS PRINCIPAIS ---
-aba_dashboard, aba_plano_acao, aba_lda = st.tabs([
+aba_dashboard, aba_ia, aba_plano_acao, aba_lda = st.tabs([
     "📊 Dashboard de OS", 
+    "🧠 IA & Confiabilidade Avançada",
     "📝 Plano de Ação (5W2H)", 
     "🛠️ Análise LDA (Componentes)"
 ])
@@ -43,28 +51,20 @@ with aba_dashboard:
             df_template.to_excel(writer, index=False, sheet_name='Planilha1')
         return output.getvalue()
 
-    st.sidebar.download_button(
-        label="📥 Baixar Planilha Modelo",
-        data=generate_template(),
-        file_name="modelo_manutencao.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.sidebar.download_button(label="📥 Baixar Planilha Modelo", data=generate_template(), file_name="modelo_manutencao.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.title("⚙️ Dashboard de Engenharia de Manutenção")
     uploaded_file = st.sidebar.file_uploader("Carregue sua planilha de ordens de serviço (Ex: PLANILHA CIM)", type=["xlsx"])
 
     if uploaded_file is not None:
         df = pd.read_excel(uploaded_file, sheet_name=0)
-        
         df.columns = df.columns.str.replace('\n', ' ').str.strip()
         df['DATA INÍCIO'] = pd.to_datetime(df['DATA INÍCIO'], errors='coerce')
         df['DATA FIM'] = pd.to_datetime(df['DATA FIM'], errors='coerce')
         df['TOTAL HORAS DECIMAIS'] = pd.to_numeric(df['TOTAL HORAS DECIMAIS'], errors='coerce').fillna(0)
         df['TIPO'] = df['TIPO'].astype(str).str.upper().str.strip()
 
-        # --- FILTROS EM CASCATA ---
         st.sidebar.header("Filtros em Cascata")
-        st.sidebar.markdown("*Deixe vazio para selecionar todos*")
         
         min_date = df['DATA INÍCIO'].min()
         max_date = df['DATA FIM'].max()
@@ -95,7 +95,7 @@ with aba_dashboard:
         else:
             df_filtered = df_cascaded.copy()
 
-        # --- KPIs BÁSICOS ---
+        # --- KPIs BÁSICOS E DISPONIBILIDADE INERENTE (Ai) ---
         st.markdown("---")
         st.markdown("### 📊 Indicadores Principais (KPIs no Período)")
         
@@ -104,22 +104,25 @@ with aba_dashboard:
         total_downtime = corretivas['TOTAL HORAS DECIMAIS'].sum()
         
         mttr = total_downtime / num_falhas if num_falhas > 0 else 0
-        
         dias_operacao = (date_range[1] - date_range[0]).days if len(date_range) == 2 else 30
         dias_operacao = max(dias_operacao, 1)
         qtd_equipamentos_total = df_filtered['EQUIPAMENTO'].nunique() if not df_filtered.empty else 1
         horas_disponiveis_total = dias_operacao * 24 * qtd_equipamentos_total
         mtbf = (horas_disponiveis_total - total_downtime) / num_falhas if num_falhas > 0 else 0
         
+        # Disponibilidade Inerente (Ai)
+        disp_inerente = (mtbf / (mtbf + mttr)) * 100 if (mtbf + mttr) > 0 else 0
+        
         tipos_count = df_filtered['TIPO'].value_counts(normalize=True) * 100
         perc_prev = tipos_count.get('PREVENTIVA', 0)
         perc_corr = tipos_count.get('CORRETIVA', 0)
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("MTBF Global (Horas)", f"{mtbf:.2f}")
         col2.metric("MTTR Global (Horas)", f"{mttr:.2f}")
-        col3.metric("% Preventiva", f"{perc_prev:.1f}%")
-        col4.metric("% Corretiva", f"{perc_corr:.1f}%")
+        col3.metric("Disponibilidade (Ai)", f"{disp_inerente:.1f}%")
+        col4.metric("% Preventiva", f"{perc_prev:.1f}%")
+        col5.metric("% Corretiva", f"{perc_corr:.1f}%")
 
         # --- EVOLUÇÃO MENSAL E RESPONSABILIDADE ---
         st.markdown("---")
@@ -176,11 +179,8 @@ with aba_dashboard:
                 max_f = dim_stats['Falhas'].max() * 1.1 if not dim_stats.empty else 1
                 max_m = dim_stats['MTTR'].max() * 1.1 if not dim_stats.empty else 1
                 
-                # Rótulos ativados e organizados
-                fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', text=dimensao, size='Downtime',
+                fig_jk = px.scatter(dim_stats, x='Falhas', y='MTTR', hover_name=dimensao, size='Downtime',
                                     title=f'Jack-Knife ({dimensao.title()})', opacity=0.8)
-                
-                fig_jk.update_traces(textposition='top center', textfont=dict(size=11, color='black'), cliponaxis=False)
                 
                 fig_jk.add_shape(type="rect", x0=0, y0=0, x1=mean_falhas, y1=mean_mttr, fillcolor="lightgreen", opacity=0.2, layer="below", line_width=0)
                 fig_jk.add_shape(type="rect", x0=mean_falhas, y0=0, x1=max_f, y1=mean_mttr, fillcolor="yellow", opacity=0.2, layer="below", line_width=0)
@@ -203,103 +203,151 @@ with aba_dashboard:
                 fig_mttr.update_traces(textposition='outside')
                 st.plotly_chart(fig_mttr, use_container_width=True)
 
-        # --- PARETO (TOP 18) ---
+        # --- PARETO ---
         st.markdown("---")
         st.markdown("### 📉 Perfil de Perdas (Pareto - Top 18)")
-        
         def plot_pareto(data, col_name, title):
             df_pareto = data.groupby(col_name)['TOTAL HORAS DECIMAIS'].sum().reset_index()
             df_pareto = df_pareto.sort_values(by='TOTAL HORAS DECIMAIS', ascending=False).head(18)
             if df_pareto.empty: return go.Figure()
-
             df_pareto['Porcentagem Acumulada'] = df_pareto['TOTAL HORAS DECIMAIS'].cumsum() / df_pareto['TOTAL HORAS DECIMAIS'].sum() * 100
-            
             fig = go.Figure()
             fig.add_trace(go.Bar(x=df_pareto[col_name], y=df_pareto['TOTAL HORAS DECIMAIS'], name="Horas Parada", marker_color='indianred', text=df_pareto['TOTAL HORAS DECIMAIS'].round(1), textposition='auto'))
             fig.add_trace(go.Scatter(x=df_pareto[col_name], y=df_pareto['Porcentagem Acumulada'], name="% Acumulada", yaxis='y2', mode='lines+markers', line=dict(color='steelblue')))
             fig.update_layout(title=title, yaxis=dict(title="Horas"), yaxis2=dict(title="%", overlaying='y', side='right', range=[0, 105]), hovermode="x unified")
             return fig
 
-        fig_pareto_equip = plot_pareto(corretivas, 'EQUIPAMENTO', 'Top 18 - Equipamentos')
         tab_p1, tab_p2, tab_p3 = st.tabs(["Por Equipamento", "Por Grupo", "Por Subgrupo"])
-        with tab_p1: st.plotly_chart(fig_pareto_equip, use_container_width=True)
+        with tab_p1: st.plotly_chart(plot_pareto(corretivas, 'EQUIPAMENTO', 'Top 18 - Equipamentos'), use_container_width=True)
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
-        # --- CONFIABILIDADE (APENAS WEIBULL) ---
-        st.markdown("---")
-        st.markdown("### 📈 Confiabilidade e Probabilidade de Falha")
-        
-        if num_falhas > 3:
-            tbf_data = corretivas.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
-            tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
-            tbf_clean = tbf_data['TBF'].dropna()
-            tbf_clean = tbf_clean[tbf_clean > 0].values
-
-            if len(tbf_clean) > 3:
-                shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
-                beta = shape
-                eta = scale
-                
-                st.success(f"**Distribuição Utilizada:** Weibull | **Parâmetro de Forma ($\\beta$):** {beta:.3f} | **Vida Característica ($\\eta$):** {eta:.2f} horas")
-
-                t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
-                reliability = st_scipy.weibull_min.sf(t, shape, loc=0, scale=scale)
-                prob_failure = st_scipy.weibull_min.cdf(t, shape, loc=0, scale=scale)
-                hazard_rate = st_scipy.weibull_min.pdf(t, shape, loc=0, scale=scale) / reliability
-                hazard_rate[np.isinf(hazard_rate)] = 0
-
-                tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade de Falha F(t)", "Taxa de Falha h(t)", "RGA"])
-
-                def setup_hover(fig):
-                    fig.update_layout(hovermode="x unified")
-                    fig.update_xaxes(showspikes=True, spikecolor="gray", spikesnap="cursor", spikemode="across")
-                    return fig
-
-                with tab_r1:
-                    fig_rel = go.Figure(go.Scatter(x=t, y=reliability, mode='lines', name='Confiabilidade', line=dict(color='green')))
-                    fig_rel.update_layout(title="Curva de Confiabilidade R(t) - Weibull", xaxis_title="Tempo (Horas)", yaxis_title="R(t)")
-                    st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
-
-                with tab_r2:
-                    fig_prob = go.Figure(go.Scatter(x=t, y=prob_failure, mode='lines', name='Prob. Acumulada', line=dict(color='red')))
-                    fig_prob.update_layout(title="Probabilidade de Falha F(t) - Weibull", xaxis_title="Tempo (Horas)", yaxis_title="F(t)")
-                    st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
-
-                with tab_r3:
-                    fig_haz = go.Figure(go.Scatter(x=t, y=hazard_rate, mode='lines', name='Taxa (h(t))', line=dict(color='orange')))
-                    fig_haz.update_layout(title="Taxa de Falha h(t) - Weibull", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
-                    st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
-
-                with tab_r4:
-                    tbf_data['Tempo Acumulado'] = tbf_data['TOTAL HORAS DECIMAIS'].cumsum()
-                    tbf_data['Falhas Acumuladas'] = range(1, len(tbf_data) + 1)
-                    tbf_data['MTBF Acumulado'] = tbf_data['Tempo Acumulado'] / tbf_data['Falhas Acumuladas']
-                    fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title="RGA - Crescimento da Confiabilidade", markers=True)
-                    st.plotly_chart(setup_hover(fig_rga), use_container_width=True)
-
-            else:
-                st.warning("Dados de TBF insuficientes (valores positivos).")
     else:
-        st.info("Por favor, faça o upload da planilha Excel para iniciar o Dashboard.")
-
-    st.markdown("---")
-    st.markdown("💡 **Como gerar o Relatório PDF:** Para evitar lentidão e erros no servidor Cloud, utilize a função nativa do seu navegador. Recolha a barra lateral esquerda e pressione **Ctrl + P** (ou Cmd + P). Selecione 'Salvar como PDF'. Todos os gráficos interativos serão impressos em alta qualidade.")
+        st.info("Faça o upload da planilha Excel para iniciar o Dashboard.")
 
 # =====================================================================
-# ABA 2: PLANO DE AÇÃO 5W2H (Google Sheets)
+# ABA 2: IA & CONFIABILIDADE AVANÇADA (FMECA, Banheira, ML)
+# =====================================================================
+with aba_ia:
+    st.header("🧠 Inteligência Artificial & Confiabilidade Avançada")
+    if uploaded_file is not None and not corretivas.empty:
+        
+        # --- 1. MATRIZ DE CRITICIDADE (FMECA) ---
+        st.markdown("### 🎯 Matriz de Criticidade (FMECA)")
+        st.markdown("Cruza a Frequência de Falhas com a Severidade (Downtime) para gerar um Score de Risco e priorizar ativos em Classe A, B ou C.")
+        
+        fmeca_dim = st.selectbox("Analisar Criticidade por:", ["EQUIPAMENTO", "GRUPO"])
+        df_fmeca = corretivas.groupby(fmeca_dim).agg(Falhas=('OS', 'count'), Severidade=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
+        
+        # Score de Risco = Ocorrencia * Severidade
+        df_fmeca['Risco (NPR)'] = df_fmeca['Falhas'] * df_fmeca['Severidade']
+        df_fmeca = df_fmeca.sort_values('Risco (NPR)', ascending=False)
+        
+        # Curva ABC baseada no Risco
+        df_fmeca['% Acumulada'] = df_fmeca['Risco (NPR)'].cumsum() / df_fmeca['Risco (NPR)'].sum() * 100
+        df_fmeca['Classe'] = np.where(df_fmeca['% Acumulada'] <= 80, 'A (Alta Criticidade)', 
+                                      np.where(df_fmeca['% Acumulada'] <= 95, 'B (Média Criticidade)', 'C (Baixa Criticidade)'))
+
+        fig_fmeca = px.scatter(df_fmeca, x='Falhas', y='Severidade', color='Classe', size='Risco (NPR)', hover_name=fmeca_dim,
+                               color_discrete_map={'A (Alta Criticidade)':'red', 'B (Média Criticidade)':'orange', 'C (Baixa Criticidade)':'green'},
+                               title=f"Matriz FMECA: Frequência vs Severidade ({fmeca_dim})")
+        st.plotly_chart(fig_fmeca, use_container_width=True)
+
+        # --- 2. CURVA DA BANHEIRA E WEIBULL ---
+        st.markdown("---")
+        st.markdown("### 🛁 Curva da Banheira (Taxa de Falha Dinâmica)")
+        st.markdown("Análise da distribuição de Weibull para identificar o estágio de vida da frota.")
+
+        tbf_data = corretivas.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
+        tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
+        tbf_clean = tbf_data['TBF'].dropna()
+        tbf_clean = tbf_clean[tbf_clean > 0].values
+
+        if len(tbf_clean) > 3:
+            shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
+            beta = shape
+            eta = scale
+            
+            estagio = "Mortalidade Infantil (Falhas Prematuras)" if beta < 1 else "Falhas Aleatórias (Vida Útil Normal)" if 1 <= beta <= 1.5 else "Fase de Desgaste (Fim de Vida)"
+            
+            st.success(f"**Parâmetro de Forma ($\\beta$):** {beta:.3f} ➔ **Diagnóstico:** {estagio}")
+            st.info(f"**Vida Característica ($\\eta$):** {eta:.2f} horas (Ponto onde 63.2% dos ativos falham).")
+
+            t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
+            reliability = st_scipy.weibull_min.sf(t, shape, loc=0, scale=scale)
+            hazard_rate = st_scipy.weibull_min.pdf(t, shape, loc=0, scale=scale) / reliability
+            hazard_rate[np.isinf(hazard_rate)] = 0
+
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                fig_haz = go.Figure(go.Scatter(x=t, y=hazard_rate, mode='lines', line=dict(color='orange')))
+                fig_haz.update_layout(title="Curva da Banheira: Taxa de Falha h(t)", xaxis_title="Tempo Operacional (Horas)", yaxis_title="Falhas / Hora")
+                st.plotly_chart(fig_haz, use_container_width=True)
+            with col_b2:
+                fig_rel = go.Figure(go.Scatter(x=t, y=reliability, mode='lines', line=dict(color='green')))
+                fig_rel.update_layout(title="Confiabilidade R(t)", xaxis_title="Tempo Operacional (Horas)", yaxis_title="Probabilidade de Sobrevivência")
+                st.plotly_chart(fig_rel, use_container_width=True)
+        else:
+            st.warning("Dados insuficientes para calcular a Curva da Banheira.")
+
+        # --- 3. MACHINE LEARNING (PREVISÃO DE SEVERIDADE) ---
+        st.markdown("---")
+        st.markdown("### 🤖 Previsão de Quebras (Machine Learning)")
+        st.markdown("O modelo de *Random Forest Regressor* analisa o histórico para prever o tempo de inatividade (Downtime) estimado caso uma falha ocorra sob condições específicas.")
+
+        if not SKLEARN_INSTALLED:
+            st.error("Biblioteca `scikit-learn` ausente. Adicione ao requirements.txt.")
+        else:
+            ml_data = corretivas[['MODELO EQUIPAMENTO', 'EQUIPAMENTO', 'GRUPO', 'RESPONSABILIDADE NÍVEL 1', 'TOTAL HORAS DECIMAIS']].dropna()
+            
+            if len(ml_data) > 10:
+                le_modelo = LabelEncoder()
+                le_equip = LabelEncoder()
+                le_grupo = LabelEncoder()
+                le_resp = LabelEncoder()
+                
+                ml_data['Modelo_Enc'] = le_modelo.fit_transform(ml_data['MODELO EQUIPAMENTO'])
+                ml_data['Equip_Enc'] = le_equip.fit_transform(ml_data['EQUIPAMENTO'])
+                ml_data['Grupo_Enc'] = le_grupo.fit_transform(ml_data['GRUPO'])
+                ml_data['Resp_Enc'] = le_resp.fit_transform(ml_data['RESPONSABILIDADE NÍVEL 1'])
+                
+                X = ml_data[['Modelo_Enc', 'Equip_Enc', 'Grupo_Enc', 'Resp_Enc']]
+                y = ml_data['TOTAL HORAS DECIMAIS']
+                
+                rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+                rf_model.fit(X, y)
+                
+                st.markdown("#### Simular Predição de Downtime")
+                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                
+                sel_modelo = col_m1.selectbox("Modelo", le_modelo.classes_)
+                sel_equip = col_m2.selectbox("Equipamento", le_equip.classes_)
+                sel_grupo = col_m3.selectbox("Grupo Afetado", le_grupo.classes_)
+                sel_resp = col_m4.selectbox("Responsabilidade", le_resp.classes_)
+                
+                if st.button("🧠 Prever Downtime"):
+                    input_data = np.array([[
+                        le_modelo.transform([sel_modelo])[0],
+                        le_equip.transform([sel_equip])[0],
+                        le_grupo.transform([sel_grupo])[0],
+                        le_resp.transform([sel_resp])[0]
+                    ]])
+                    pred = rf_model.predict(input_data)[0]
+                    st.info(f"⏱️ **Previsão de Máquina Parada:** O modelo estima que uma falha com essas características resultará em um Downtime de **{pred:.2f} horas**.")
+            else:
+                st.warning("Histórico insuficiente para treinar o modelo de Machine Learning (mínimo de 10 corretivas necessárias).")
+    else:
+        st.info("Faça o upload da planilha Excel para iniciar o Dashboard.")
+
+# =====================================================================
+# ABA 3: PLANO DE AÇÃO 5W2H (Google Sheets)
 # =====================================================================
 with aba_plano_acao:
     st.header("📋 Plano de Ação 5W2H")
-    
     url_planilha = "https://docs.google.com/spreadsheets/d/1mrfp_qDdX5_6sJVT5-Gk3NzM3nKqznmlR6rwDsXZN2s/edit?gid=0#gid=0"
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    colunas_5w2h = [
-        "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
-        "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", 
-        "How? (Como)", "How Much? (Custo Estimado)", "Status"
-    ]
+    colunas_5w2h = ["NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", "How? (Como)", "How Much? (Custo Estimado)", "Status"]
 
     try:
         df_acao = conn.read(spreadsheet=url_planilha)
@@ -310,15 +358,7 @@ with aba_plano_acao:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    st.markdown("Edite a tabela abaixo e clique em **Salvar no Google Sheets**.")
-    df_editado = st.data_editor(
-        df_acao, 
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "Status": st.column_config.SelectboxColumn("Status", options=["Pendente", "Em Andamento", "Concluído", "Atrasado"], required=False)
-        }
-    )
+    df_editado = st.data_editor(df_acao, num_rows="dynamic", use_container_width=True, column_config={"Status": st.column_config.SelectboxColumn("Status", options=["Pendente", "Em Andamento", "Concluído", "Atrasado"], required=False)})
     
     if st.button("💾 Salvar no Google Sheets"):
         with st.spinner("Salvando..."):
@@ -328,13 +368,11 @@ with aba_plano_acao:
             except Exception:
                 st.warning("⚠️ **Autenticação Necessária na Nuvem:** O Streamlit bloqueou a gravação pois a sua Service Account não está configurada nos Secrets. Baixe o plano como backup.")
                 
-    st.markdown("---")
-    st.markdown("💡 **Plano B:** Caso as credenciais do Google Sheets não estejam configuradas na nuvem, faça o download do CSV.")
     csv = df_editado.to_csv(index=False).encode('utf-8')
     st.download_button(label="📥 Baixar Plano de Ação (CSV Local)", data=csv, file_name='plano_acao_backup.csv', mime='text/csv')
 
 # =====================================================================
-# ABA 3: CONTROLE DE COMPONENTES E LDA
+# ABA 4: CONTROLE DE COMPONENTES E LDA
 # =====================================================================
 with aba_lda:
     st.header("🛠️ Análise de Dados de Vida (LDA) - Componentes")
@@ -343,14 +381,11 @@ with aba_lda:
         st.error("⚠️ **Atenção:** Biblioteca `lifelines` ausente. Adicione `lifelines` ao `requirements.txt`.")
     else:
         file_lda = st.file_uploader("Carregue a planilha de Controle de Componentes (Ex: SKT110S & SKT130Pro)", type=["xlsx"], key="lda_uploader")
-        
         if file_lda is not None:
             df_comp = pd.read_excel(file_lda, sheet_name=0)
             df_comp.columns = df_comp.columns.str.replace('\n', ' ').str.replace('  ', ' ').str.strip()
             
             if 'SITUAÇÃO DO COMPONENTE' in df_comp.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp.columns:
-                
-                # Filtro de MODELO
                 if 'MODELO' in df_comp.columns:
                     modelos_disp = df_comp['MODELO'].dropna().astype(str).unique().tolist()
                     modelo_alvo = st.multiselect("Filtre pelo Modelo:", modelos_disp, default=modelos_disp)
@@ -374,52 +409,19 @@ with aba_lda:
                     cols_to_show = ['MODELO', 'TAG', 'COMPONENTE', 'SITUAÇÃO DO COMPONENTE', 'Horas_LDA']
                     cols_exist = [c for c in cols_to_show if c in df_alvo.columns]
                     st.dataframe(df_alvo[cols_exist].sort_values('Horas_LDA', ascending=False), use_container_width=True)
-                    
-                    st.write(f"**Amostras no DataSet:** {len(df_alvo)} | **Falhas (Eventos):** {falhas_count} | **Censuras (Em Operação):** {susp_count}")
+                    st.write(f"**Amostras:** {len(df_alvo)} | **Falhas:** {falhas_count} | **Censuras:** {susp_count}")
                     
                     if falhas_count > 0:
                         wf = WeibullFitter()
                         wf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
-                        
-                        beta_lda = wf.rho_
-                        eta_lda = wf.lambda_
-                        mttf_lda = eta_lda * gamma(1 + (1/beta_lda))
-                        
-                        st.success(f"**Parâmetros Weibull:** $\\beta$ (Forma) = {beta_lda:.2f} | $\\eta$ (Vida Característica) = {eta_lda:.2f}h | **MTTF Estimado:** {mttf_lda:.2f}h")
-                        
-                        kmf = KaplanMeierFitter()
-                        kmf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
-                        
-                        t_lda = np.linspace(0.1, df_alvo['Horas_LDA'].max() * 1.2, 100)
-                        weibull_surv = wf.survival_function_at_times(t_lda)
-                        weibull_cdf = wf.cumulative_density_at_times(t_lda)
-                        weibull_haz = wf.hazard_at_times(t_lda)
-                        
-                        tab_l1, tab_l2, tab_l3 = st.tabs(["Confiabilidade R(t)", "Prob. de Falha F(t)", "Taxa de Falha h(t)"])
-                        
-                        with tab_l1:
-                            fig_l1 = go.Figure()
-                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier (Real)'))
-                            fig_l1.add_trace(go.Scatter(x=t_lda, y=weibull_surv, mode='lines', line=dict(dash='dash', color='red'), name='Weibull (Ajuste)'))
-                            fig_l1.update_layout(title="Aderência da Confiabilidade R(t)", xaxis_title="Horas Operacionais", yaxis_title="R(t)", hovermode="x unified")
-                            st.plotly_chart(fig_l1, use_container_width=True)
-                            
-                        with tab_l2:
-                            fig_l2 = go.Figure(go.Scatter(x=t_lda, y=weibull_cdf, mode='lines', line=dict(color='orange')))
-                            fig_l2.update_layout(title="Probabilidade Acumulada de Falha F(t)", xaxis_title="Horas Operacionais", yaxis_title="F(t)", hovermode="x unified")
-                            st.plotly_chart(fig_l2, use_container_width=True)
-                            
-                        with tab_l3:
-                            fig_l3 = go.Figure(go.Scatter(x=t_lda, y=weibull_haz, mode='lines', line=dict(color='purple')))
-                            fig_l3.update_layout(title="Taxa de Falha h(t)", xaxis_title="Horas Operacionais", yaxis_title="h(t)", hovermode="x unified")
-                            st.plotly_chart(fig_l3, use_container_width=True)
+                        mttf_lda = wf.lambda_ * gamma(1 + (1/wf.rho_))
+                        st.success(f"**Parâmetros Weibull:** $\\beta$ = {wf.rho_:.2f} | $\\eta$ = {wf.lambda_:.2f}h | **MTTF Estimado:** {mttf_lda:.2f}h")
                     else:
-                        st.warning("Não há falhas registradas. Não é possível calcular os parâmetros estatísticos de vida.")
+                        st.warning("Sem falhas. Curva não pode ser gerada.")
                 
-                # --- MAPA DE CALOR COM FILTROS E TABELA DE VIDA ÚTIL ---
+                # --- MAPA DE CALOR ---
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante da Frota")
-                
                 component_mttf = {}
                 for comp in df_comp['COMPONENTE'].dropna().unique():
                     df_c = df_comp[(df_comp['COMPONENTE'] == comp) & (df_comp['Horas_LDA'] > 0)]
@@ -427,8 +429,7 @@ with aba_lda:
                         try:
                             wf_heat = WeibullFitter()
                             wf_heat.fit(df_c['Horas_LDA'], event_observed=df_c['Status_LDA'])
-                            mttf_heat = wf_heat.lambda_ * gamma(1 + (1/wf_heat.rho_))
-                            component_mttf[comp] = mttf_heat
+                            component_mttf[comp] = wf_heat.lambda_ * gamma(1 + (1/wf_heat.rho_))
                         except Exception:
                             pass
 
@@ -440,51 +441,24 @@ with aba_lda:
                     df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
                     df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
                     
-                    st.markdown("#### Filtros do Mapa de Calor")
                     col_f1, col_f2 = st.columns(2)
-                    
                     with col_f1:
                         max_vida = float(df_ativos['Vida_Consumida_%'].max()) if not df_ativos.empty else 100.0
-                        faixa_vida = st.slider(
-                            "Selecione a faixa de % de Vida Consumida:", 
-                            min_value=0.0, 
-                            max_value=max(200.0, max_vida), 
-                            value=(0.0, max(100.0, max_vida))
-                        )
-                    
+                        faixa_vida = st.slider("Selecione a faixa de % de Vida Consumida:", min_value=0.0, max_value=max(200.0, max_vida), value=(0.0, max(100.0, max_vida)))
                     with col_f2:
                         comps_heatmap = df_ativos['COMPONENTE'].unique().tolist()
                         selecao_comps = st.multiselect("Selecione os Componentes para exibir:", comps_heatmap, default=comps_heatmap)
 
-                    df_heat_filtered = df_ativos[
-                        (df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & 
-                        (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) &
-                        (df_ativos['COMPONENTE'].isin(selecao_comps))
-                    ]
+                    df_heat_filtered = df_ativos[(df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) & (df_ativos['COMPONENTE'].isin(selecao_comps))]
 
                     if not df_heat_filtered.empty:
                         heatmap_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
-                        
-                        fig_heat = px.imshow(
-                            heatmap_data, 
-                            text_auto=".1f", 
-                            aspect="auto", 
-                            color_continuous_scale="RdYlGn_r",
-                            title="Mapa de Calor: Porcentagem (%) do MTTF Consumida",
-                        )
-                        fig_heat.update_layout(coloraxis_colorbar=dict(title="% Consumida", thicknessmode="pixels", thickness=15))
+                        fig_heat = px.imshow(heatmap_data, text_auto=".1f", aspect="auto", color_continuous_scale="RdYlGn_r", title="Porcentagem (%) do MTTF Consumida")
                         st.plotly_chart(fig_heat, use_container_width=True)
                         
-                        # Tabela de Vida Útil (MTTF) abaixo do mapa
                         st.markdown("#### 🕒 Tabela de Vida Útil (MTTF Estimado)")
                         df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
                         df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
-                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
                         st.dataframe(df_mttf_display, use_container_width=True)
-                    else:
-                        st.warning("Nenhum dado encontrado para os filtros selecionados.")
-                else:
-                    st.info("É necessário haver falhas computadas nos componentes para determinar o MTTF e compará-los com as peças ativas no mapa de calor.")
-
             else:
-                st.error("A planilha não possui as colunas 'SITUAÇÃO DO COMPONENTE' e/ou 'HORAS TRABALHADAS DO COMPONENTE'.")
+                st.error("A planilha não possui as colunas necessárias.")
