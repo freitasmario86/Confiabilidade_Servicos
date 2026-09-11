@@ -7,3 +7,5 @@ openpyxl
 openpyxl
 st-gsheets-connection
 lifelines
+kaleido
+fpdf
