@@ -365,27 +365,59 @@ with aba_estrategia:
                 st.table(tabela_inspecao)
             
             with col_grafico:
-                t_plot = np.linspace(0.1, max(tbf_clean_insp)*1.5, 300)
-                # CDF Teórica (Weibull)
-                cdf_plot = st_scipy.weibull_min.cdf(t_plot, shape_i, scale=scale_i) * 100
-                fig_cdf = go.Figure()
-                fig_cdf.add_trace(go.Scatter(x=t_plot, y=cdf_plot, mode='lines', name='CDF Teórica (Weibull)', line=dict(color='blue')))
+                # ABAS PARA SEPARAR A CDF LINEAR DO PROBABILITY PLOT (LOG)
+                tab_cdf, tab_log = st.tabs(["CDF Linear (F(t))", "Probability Plot (Log-Log)"])
                 
-                # Adição da CDF Empírica (Kaplan-Meier - Dados Reais)
+                t_plot = np.linspace(0.1, max(tbf_clean_insp)*1.5, 300)
+                cdf_plot = st_scipy.weibull_min.cdf(t_plot, shape_i, scale=scale_i) * 100
+                
+                # Cálculo da CDF Empírica (Kaplan-Meier)
                 kmf_i = KaplanMeierFitter()
                 kmf_i.fit(tbf_clean_insp, event_observed=np.ones_like(tbf_clean_insp))
                 emp_f = (1 - kmf_i.survival_function_['KM_estimate']) * 100
-                fig_cdf.add_trace(go.Scatter(x=emp_f.index, y=emp_f.values, mode='markers', name='CDF Empírica (Dados Reais)', marker=dict(color='black', symbol='circle', size=6)))
 
-                # Marcações com posições alternadas para evitar sobreposição
-                fig_cdf.add_vline(x=B2, line_dash="dash", line_color="red", annotation_text="B2 (2%)", annotation_position="top left")
-                fig_cdf.add_vline(x=B10, line_dash="dash", line_color="orange", annotation_text="B10 (10%)", annotation_position="top right")
-                fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF", annotation_position="bottom right")
-                
-                fig_cdf.add_hline(y=2, line_dash="dot", line_color="red", opacity=0.5)
-                fig_cdf.add_hline(y=10, line_dash="dot", line_color="orange", opacity=0.5)
-                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t) (CDF)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+15)]))
-                st.plotly_chart(fig_cdf, use_container_width=True)
+                # 1. Gráfico CDF Linear
+                with tab_cdf:
+                    fig_cdf = go.Figure()
+                    fig_cdf.add_trace(go.Scatter(x=t_plot, y=cdf_plot, mode='lines', name='CDF Teórica (Weibull)', line=dict(color='blue')))
+                    fig_cdf.add_trace(go.Scatter(x=emp_f.index, y=emp_f.values, mode='markers', name='CDF Empírica', marker=dict(color='black', symbol='circle')))
+                    
+                    fig_cdf.add_vline(x=B2, line_dash="dash", line_color="red", annotation_text="B2 (2%)", annotation_position="top left")
+                    fig_cdf.add_vline(x=B10, line_dash="dash", line_color="orange", annotation_text="B10 (10%)", annotation_position="top right")
+                    fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF", annotation_position="bottom right")
+                    fig_cdf.add_hline(y=2, line_dash="dot", line_color="red", opacity=0.5)
+                    fig_cdf.add_hline(y=10, line_dash="dot", line_color="orange", opacity=0.5)
+                    fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+15)]))
+                    st.plotly_chart(fig_cdf, use_container_width=True)
+
+                # 2. Gráfico Weibull Plot (Log-Log)
+                with tab_log:
+                    # Preparando dados para log
+                    t_log = t_plot[t_plot > 0]
+                    cdf_log = st_scipy.weibull_min.cdf(t_log, shape_i, scale=scale_i)
+                    
+                    # Evitando valores zero para o eixo Log
+                    cdf_log = np.where(cdf_log == 0, 1e-5, cdf_log)
+                    cdf_log = np.where(cdf_log == 1, 0.9999, cdf_log)
+                    
+                    fig_log = go.Figure()
+                    # A transformação matemática padrão do Probability Plot de Weibull é ln(-ln(1-F(t))) vs ln(t)
+                    # Porém o Plotly possui nativamente o eixo Log
+                    fig_log.add_trace(go.Scatter(x=t_log, y=cdf_log*100, mode='lines', name='Linha de Tendência', line=dict(color='blue')))
+                    fig_log.add_trace(go.Scatter(x=emp_f.index, y=emp_f.values, mode='markers', name='Dados', marker=dict(color='black')))
+                    
+                    fig_log.update_layout(
+                        title="Weibull Probability Plot",
+                        xaxis_title="Tempo (Horas)",
+                        yaxis_title="Probabilidade Cumulativa (%)",
+                        xaxis_type="log",
+                        yaxis=dict(
+                            type="log",
+                            tickvals=[1, 2, 5, 10, 20, 50, 90, 99],
+                            ticktext=["1", "2", "5", "10", "20", "50", "90", "99"]
+                        )
+                    )
+                    st.plotly_chart(fig_log, use_container_width=True)
         else:
             st.warning("Dados insuficientes para calcular os parâmetros B2 e B10.")
 
@@ -447,7 +479,6 @@ with aba_plano_acao:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    # Conversão super blindada para não virar float64: Força TUDO a ser string limpa primeiro
     for col in colunas_5w2h:
         if col not in ['When? (Prazo)', 'Prazo Original', 'Nova Data']:
             df_acao[col] = df_acao[col].astype(str).replace({'nan': '', 'None': '', '<NA>': '', 'NaN': ''})
@@ -474,7 +505,6 @@ with aba_plano_acao:
 
     st.markdown("Edite a tabela abaixo e clique em **Salvar no Google Sheets**.")
     
-    # Configuração Explícita garantindo que a coluna What nunca mais seja numérica
     df_editado = st.data_editor(
         df_display, 
         num_rows="dynamic", 
@@ -498,7 +528,6 @@ with aba_plano_acao:
     )
     
     if st.button("💾 Salvar no Google Sheets (via Apps Script)"):
-        # Validação Exigência de Reprogramação
         linhas_invalidas = df_editado[
             (df_editado['Status'].isin(['Reprogramado', 'Atrasado'])) & 
             ((df_editado['Motivo'].isna()) | (df_editado['Motivo'] == "") | (df_editado['Nova Data'].isna()))
@@ -511,16 +540,13 @@ with aba_plano_acao:
                 try:
                     hoje = datetime.now().strftime('%d/%m/%Y')
                     
-                    # Garantir que a coluna Histórico não é vista como Float64 antes do loop
                     df_editado['Histórico'] = df_editado['Histórico'].astype(str).replace({'nan': '', 'None': '', '<NA>': ''})
                     df_editado['Dias de Atraso'] = df_editado['Dias de Atraso'].astype(str).replace({'nan': '', 'None': '', '<NA>': ''})
                     
                     for idx, row in df_editado.iterrows():
-                        # REGRA 1: Travar Prazo Original
                         if pd.isnull(row['Prazo Original']) and pd.notnull(row['When? (Prazo)']):
                             df_editado.at[idx, 'Prazo Original'] = row['When? (Prazo)']
                             
-                        # REGRA 2: Calcular Atraso
                         try:
                             prazo_orig = pd.to_datetime(df_editado.at[idx, 'Prazo Original'])
                             nova_dt = pd.to_datetime(row['Nova Data'])
@@ -530,7 +556,6 @@ with aba_plano_acao:
                         except Exception:
                             pass
                         
-                        # REGRA 3: Histórico de Alteração
                         old_status = str(df_acao.loc[idx, 'Status']) if idx in df_acao.index else ""
                         new_status = str(row.get('Status', ''))
                         
@@ -551,12 +576,12 @@ with aba_plano_acao:
                     df_acao['Prazo Original'] = df_acao['Prazo Original'].apply(format_date_safe)
                     df_acao['Nova Data'] = df_acao['Nova Data'].apply(format_date_safe)
 
+                    df_editado = df_editado.astype(str)
                     df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
                     df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
                     
-                    # SUPER LIMPEZA JSON: Varre coluna a coluna e mata qualquer NaN para não crashear
-                    for col in df_final.columns:
-                        df_final[col] = df_final[col].astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': '', 'NaN': ''})
+                    df_final = df_final.fillna("")
+                    df_final = df_final.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': '', 'NaN': ''})
                     
                     dados_json = df_final.to_dict(orient="records")
                     resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
@@ -700,9 +725,64 @@ with aba_lda:
                 df_ativos['MTTF'] = df_ativos['COMPONENTE'].map(component_mttf)
                 df_ativos = df_ativos.dropna(subset=['MTTF'])
 
-                if not df_ativos.empty and 'TAG' in df_ativos.columns:
+                if not df_ativos.empty and 'TAG' in df_ativos.columns and 'DATA' in df_ativos.columns: # ASSUMINDO COLUNA DATA
                     df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
                     df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
+                    
+                    # Criação de Texto Customizado para o Hover (Horímetro, % e Data)
+                    df_ativos['Hover_Text'] = df_ativos.apply(
+                        lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
+                                    f"<b>Componente:</b> {row['COMPONENTE']}<br>"
+                                    f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
+                                    f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
+                                    f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h<br>"
+                                    f"<b>Data de Leitura:</b> {format_date_safe(row.get('DATA', 'N/A'))}", axis=1
+                    )
+                    
+                    col_f1, col_f2 = st.columns(2)
+                    with col_f1:
+                        max_vida = float(df_ativos['Vida_Consumida_%'].max()) if not df_ativos.empty else 100.0
+                        faixa_vida = st.slider("Filtro %:", min_value=0.0, max_value=max(200.0, max_vida), value=(0.0, max(100.0, max_vida)))
+                    with col_f2:
+                        comps_heatmap = df_ativos['COMPONENTE'].unique().tolist()
+                        selecao_comps = st.multiselect("Componentes:", comps_heatmap, default=comps_heatmap)
+
+                    df_heat_filtered = df_ativos[(df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) & (df_ativos['COMPONENTE'].isin(selecao_comps))]
+
+                    if not df_heat_filtered.empty:
+                        # Pivotando os dados para a Matriz
+                        heatmap_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
+                        hover_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Hover_Text', aggfunc='first').fillna("")
+                        
+                        fig_heat = go.Figure(data=go.Heatmap(
+                            z=heatmap_data.values,
+                            x=heatmap_data.columns,
+                            y=heatmap_data.index,
+                            text=heatmap_data.values.round(1),
+                            texttemplate="%{text}",
+                            customdata=hover_data.values,
+                            hovertemplate="%{customdata}<extra></extra>",
+                            colorscale="RdYlGn_r"
+                        ))
+                        fig_heat.update_layout(title="Porcentagem (%) do MTTF Consumida", xaxis_title="COMPONENTE", yaxis_title="EQUIP")
+                        st.plotly_chart(fig_heat, use_container_width=True)
+                        
+                        df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
+                        df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
+                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
+                        st.dataframe(df_mttf_display, use_container_width=True)
+                # SE NÃO TIVER COLUNA DATA, FAZ O HOVER PADRÃO COM HORÍMETRO
+                elif not df_ativos.empty and 'TAG' in df_ativos.columns:
+                    df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
+                    df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
+                    
+                    df_ativos['Hover_Text'] = df_ativos.apply(
+                        lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
+                                    f"<b>Componente:</b> {row['COMPONENTE']}<br>"
+                                    f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
+                                    f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
+                                    f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h", axis=1
+                    )
                     
                     col_f1, col_f2 = st.columns(2)
                     with col_f1:
@@ -716,7 +796,20 @@ with aba_lda:
 
                     if not df_heat_filtered.empty:
                         heatmap_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
-                        st.plotly_chart(px.imshow(heatmap_data, text_auto=".1f", aspect="auto", color_continuous_scale="RdYlGn_r"), use_container_width=True)
+                        hover_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Hover_Text', aggfunc='first').fillna("")
+                        
+                        fig_heat = go.Figure(data=go.Heatmap(
+                            z=heatmap_data.values,
+                            x=heatmap_data.columns,
+                            y=heatmap_data.index,
+                            text=heatmap_data.values.round(1),
+                            texttemplate="%{text}",
+                            customdata=hover_data.values,
+                            hovertemplate="%{customdata}<extra></extra>",
+                            colorscale="RdYlGn_r"
+                        ))
+                        fig_heat.update_layout(title="Porcentagem (%) do MTTF Consumida", xaxis_title="COMPONENTE", yaxis_title="EQUIP")
+                        st.plotly_chart(fig_heat, use_container_width=True)
                         
                         df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
                         df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
