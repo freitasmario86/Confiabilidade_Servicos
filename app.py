@@ -67,10 +67,15 @@ def remove_accents(input_str):
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def get_pdf_lines(pdf, text, width):
-    """Calcula matematicamente quantas linhas um texto vai ocupar para quebrar a célula no PDF"""
-    text = str(text).replace("\n", " ")
-    if not text or text == "nan": return 1
-    return max(1, math.ceil(pdf.get_string_width(text) / (width - 2)))
+    """Calcula matematicamente as quebras de linha para a célula do PDF"""
+    if pd.isna(text) or str(text).strip() == "" or str(text) == "nan":
+        return 1
+    text = str(text)
+    lines = 0
+    # Conta quebras de linha manuais e automáticas
+    for paragraph in text.split('\n'):
+        lines += max(1, math.ceil(pdf.get_string_width(paragraph) / (width - 2)))
+    return lines
 
 # --- NAVEGAÇÃO POR ABAS PRINCIPAIS ---
 aba_dashboard, aba_ia, aba_estrategia, aba_plano_acao, aba_lda = st.tabs([
@@ -243,7 +248,7 @@ with aba_dashboard:
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
     else:
-        st.info("Faça o upload da planilha Excel de OS para iniciar o Dashboard.")
+        st.info("Faça o upload da Planilha de OS.")
 
 # =====================================================================
 # ABA 2: IA & CONFIABILIDADE AVANÇADA
@@ -288,7 +293,7 @@ with aba_ia:
             fig_haz_g.update_layout(title="Curva da Banheira: Taxa de Falha h(t)", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
             st.plotly_chart(fig_haz_g, use_container_width=True)
         else:
-            st.warning("Dados de TBF insuficientes.")
+            st.warning("Dados insuficientes.")
     else:
         st.info("Carregue a planilha na aba principal.")
 
@@ -312,10 +317,10 @@ with aba_estrategia:
         gr_sp = col_s3.selectbox("Filtre o Grupo:", ["Todos"] + df_sp['GRUPO'].dropna().unique().tolist())
         if gr_sp != "Todos": df_sp = df_sp[df_sp['GRUPO'] == gr_sp]
         
-        sub_sp = col_s4.selectbox("Selecione o Subgrupo Alvo:", ["Todos"] + df_sp['SUBGRUPO'].dropna().unique().tolist())
+        sub_sp = col_s4.selectbox("Selecione o Subgrupo:", ["Todos"] + df_sp['SUBGRUPO'].dropna().unique().tolist())
         if sub_sp != "Todos": df_sp = df_sp[df_sp['SUBGRUPO'] == sub_sp]
         
-        horas_projecao = st.number_input("Insira as Horas de Projeção (ex: 4380h para 6 meses)", value=4380, min_value=1)
+        horas_projecao = st.number_input("Horas de Projeção (ex: 4380h para 6 meses)", value=4380, min_value=1)
         
         falhas_spare = len(df_sp)
         if falhas_spare > 0 and (mod_sp != "Todos" or eq_sp != "Todos" or gr_sp != "Todos" or sub_sp != "Todos"):
@@ -379,7 +384,7 @@ with aba_estrategia:
         
         if len(tbf_clean_insp) > 3:
             if shape_i <= 1:
-                st.error(f"$\\beta$ ({shape_i:.3f}) $\le$ 1. A manutenção baseada no tempo não é econômica para este modo de falha.")
+                st.error(f"$\\beta$ ({shape_i:.3f}) $\le$ 1. A manutenção baseada no tempo não é econômica.")
             else:
                 col_c1, col_c2 = st.columns(2)
                 C_pm = col_c1.number_input("Custo de Manutenção Preventiva / Planejada (Cpm)", value=1500)
@@ -415,10 +420,11 @@ with aba_plano_acao:
     
     conn = st.connection("gsheets", type=GSheetsConnection)
     
+    # Nomes exatos para evitar duplicação no Pandas/Google Sheets
     colunas_5w2h = [
-        "NOME DO CONTRATO", "What? (O que)", "Why? (Por que)", 
-        "Where? (Onde)", "Prazo Original", "Who? (Responsável)", 
-        "How? (Como)", "Custo", "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
+        "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
+        "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", 
+        "How? (Como)", "How Much? (Custo Estimado)", "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
     ]
     
     try:
@@ -434,8 +440,12 @@ with aba_plano_acao:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    # Formatar datas para o st.data_editor
-    df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], format='%d/%m/%Y', errors='coerce')
+    # Limpeza forte para evitar erros Float64 e "None"
+    df_acao = df_acao.fillna("")
+    for col in colunas_5w2h:
+        df_acao[col] = df_acao[col].astype(str).replace({'nan': '', 'None': '', 'NaT': ''})
+
+    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], format='%d/%m/%Y', errors='coerce')
     df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], format='%d/%m/%Y', errors='coerce')
 
     st.markdown("#### Filtros do Plano de Ação")
@@ -443,8 +453,8 @@ with aba_plano_acao:
     contratos_disp = df_acao["NOME DO CONTRATO"].dropna().astype(str).unique().tolist()
     status_disp = df_acao["Status"].dropna().astype(str).unique().tolist()
     
-    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != "nan" and c != ""])
-    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != "nan" and s != ""])
+    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != "" and c != "nan"])
+    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != "" and s != "nan"])
     
     df_display = df_acao.copy()
     if filtro_contrato:
@@ -459,16 +469,15 @@ with aba_plano_acao:
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
-            "Prazo Original": st.column_config.DateColumn("Prazo Original", format="DD/MM/YYYY"),
+            "When? (Prazo)": st.column_config.DateColumn("When? (Prazo)", format="DD/MM/YYYY"),
             "Nova Data": st.column_config.DateColumn("Nova Data", format="DD/MM/YYYY"),
             "Status": st.column_config.SelectboxColumn("Status", options=["Concluído", "Em Andamento", "Reprogramado", "Atrasado"], required=False),
-            "Dias de Atraso": st.column_config.NumberColumn("Dias de Atraso", disabled=True),
+            "Dias de Atraso": st.column_config.TextColumn("Dias de Atraso", disabled=True),
             "Histórico": st.column_config.TextColumn("Histórico", disabled=True)
         }
     )
     
     if st.button("💾 Salvar no Google Sheets (via Apps Script)"):
-        # Validação: Exige motivo e nova data se reprogramado ou atrasado
         linhas_invalidas = df_editado[
             (df_editado['Status'].isin(['Reprogramado', 'Atrasado'])) & 
             ((df_editado['Motivo'].isna()) | (df_editado['Motivo'] == "") | (df_editado['Nova Data'].isna()))
@@ -477,21 +486,23 @@ with aba_plano_acao:
         if not linhas_invalidas.empty:
             st.error("⚠️ **Atenção:** Ações 'Reprogramadas' ou 'Atrasadas' exigem o preenchimento de 'Motivo' e 'Nova Data'.")
         else:
-            with st.spinner("Processando e Enviando..."):
+            with st.spinner("Processando Auditoria e Enviando..."):
                 try:
                     hoje = datetime.now().strftime('%d/%m/%Y')
+                    df_editado = df_editado.fillna("")
+                    
                     for idx, row in df_editado.iterrows():
-                        # Cálculo Automático de Dias de Atraso
+                        # Calcula dias de atraso
                         try:
-                            prazo = pd.to_datetime(row['Prazo Original'])
+                            prazo = pd.to_datetime(row['When? (Prazo)'])
                             nova = pd.to_datetime(row['Nova Data'])
                             if pd.notnull(prazo) and pd.notnull(nova):
                                 atraso = (nova - prazo).days
-                                df_editado.at[idx, 'Dias de Atraso'] = atraso if atraso > 0 else 0
+                                df_editado.at[idx, 'Dias de Atraso'] = str(atraso) if atraso > 0 else "0"
                         except Exception:
                             pass
                         
-                        # Histórico Automático (Auditoria)
+                        # Histórico de Status
                         if idx in df_acao.index:
                             old_status = str(df_acao.loc[idx, 'Status'])
                             new_status = str(row['Status'])
@@ -500,18 +511,19 @@ with aba_plano_acao:
                                 if hist == "nan": hist = ""
                                 nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y') if pd.notnull(row['Nova Data']) else ''
                                 novo_reg = f"[{hoje}] Mudou para {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
-                                df_editado.at[idx, 'Histórico'] = (hist + "\n" + novo_reg).strip()
+                                df_editado.at[idx, 'Histórico'] = (hist + " | " + novo_reg).strip(" | ")
 
-                    # Transforma em formato String para o Google Sheets
-                    df_editado['Prazo Original'] = pd.to_datetime(df_editado['Prazo Original']).dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_editado['When? (Prazo)'] = pd.to_datetime(df_editado['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
                     df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original']).dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
                     df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
 
+                    df_editado = df_editado.astype(str).replace({'nan': '', 'None': '', 'NaT': ''})
                     df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
                     df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
                     
-                    dados_json = df_final.fillna("").to_dict(orient="records")
+                    import requests
+                    dados_json = df_final.to_dict(orient="records")
                     resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
                     
                     if resposta.status_code == 200 and resposta.json().get("status") == "success":
@@ -520,9 +532,9 @@ with aba_plano_acao:
                     else:
                         st.error(f"Erro do servidor: {resposta.text}")
                 except Exception as e:
-                    st.error(f"⚠️ Erro ao salvar: {e}")
+                    st.error(f"⚠️ Erro ao processar/salvar: {e}")
 
-    # --- EXPORTAÇÃO EXCEL E PDF CORRIGIDA (WRAP TEXTO) ---
+    # --- EXPORTAÇÃO EXCEL E PDF ---
     st.markdown("---")
     st.markdown("### 📥 Exportar Plano de Ação (Filtrado)")
     col_d1, col_d2 = st.columns(2)
@@ -535,27 +547,27 @@ with aba_plano_acao:
         
     with col_d2:
         if FPDF_INSTALLED:
-            pdf = FPDF(orientation='L', unit='mm', format='A4') # Paisagem
+            pdf = FPDF(orientation='L', unit='mm', format='A4')
             pdf.add_page()
             pdf.set_font("Arial", 'B', 12)
             pdf.cell(0, 10, "Plano de Acao 5W2H", ln=True, align='C')
             
             pdf.set_font("Arial", 'B', 7)
+            # Cabeçalhos encurtados para o PDF
             pdf_headers = ["Contrato", "O que", "Por que", "Onde", "Prazo", "Resp.", "Como", "Custo", "Status", "Motivo", "Nova Data", "Atraso", "Historico"]
-            # Larguras ajustadas para somar 277mm (largura útil da página A4 Paisagem)
-            col_widths = [15, 25, 20, 15, 16, 15, 25, 15, 18, 25, 16, 12, 60] 
+            col_widths = [18, 25, 20, 15, 18, 15, 25, 15, 18, 25, 18, 10, 55] 
             
             # Print Headers
             max_lines = 1
             for i, col in enumerate(pdf_headers):
-                lines = get_pdf_lines(pdf, col, col_widths[i])
+                lines = get_pdf_lines(pdf, remove_accents(col), col_widths[i])
                 if lines > max_lines: max_lines = lines
             row_height = max_lines * 4
             x, y = pdf.get_x(), pdf.get_y()
             for i, col in enumerate(pdf_headers):
-                pdf.rect(x, y, col_widths[i], row_height)
                 pdf.set_xy(x, y)
-                pdf.multi_cell(col_widths[i], 4, remove_accents(col), border=0, align='C')
+                pdf.multi_cell(col_widths[i], 4, remove_accents(col), border=0, align='L')
+                pdf.rect(x, y, col_widths[i], row_height)
                 x += col_widths[i]
             pdf.set_y(y + row_height)
             
@@ -563,7 +575,7 @@ with aba_plano_acao:
             pdf.set_font("Arial", '', 6)
             for idx, row in df_editado.iterrows():
                 row_data = [str(row.get(c, "")) for c in colunas_5w2h]
-                row_data = [remove_accents(item) if item != "nan" and item != "NaT" else "" for item in row_data]
+                row_data = [remove_accents(item) if item not in ["nan", "NaT", "None"] else "" for item in row_data]
                 
                 max_lines = 1
                 for i, text in enumerate(row_data):
@@ -572,15 +584,14 @@ with aba_plano_acao:
                 row_height = max_lines * 4
                 
                 x, y = pdf.get_x(), pdf.get_y()
-                # Verifica se precisa de quebra de página
                 if y + row_height > 190:
                     pdf.add_page()
-                    y = pdf.get_y()
+                    x, y = pdf.get_x(), pdf.get_y()
                     
                 for i, text in enumerate(row_data):
-                    pdf.rect(x, y, col_widths[i], row_height)
                     pdf.set_xy(x, y)
-                    pdf.multi_cell(col_widths[i], 4, text, border=0)
+                    pdf.multi_cell(col_widths[i], 4, text, border=0, align='L')
+                    pdf.rect(x, y, col_widths[i], row_height)
                     x += col_widths[i]
                 pdf.set_y(y + row_height)
             
@@ -599,7 +610,6 @@ with aba_lda:
         st.error("⚠️ Biblioteca `lifelines` ausente no requirements.txt.")
     else:
         file_lda = st.file_uploader("Carregue a planilha de Controle de Componentes", type=["xlsx"], key="lda_uploader")
-        
         if file_lda is not None:
             df_comp_raw = pd.read_excel(file_lda, sheet_name=0)
             df_comp_raw.columns = df_comp_raw.columns.str.replace('\n', ' ').str.replace('  ', ' ').str.strip()
@@ -632,6 +642,7 @@ with aba_lda:
                     st.markdown("### 📋 Tabela Resumo")
                     cols_exist = [c for c in ['MODELO', 'TAG', 'COMPONENTE', 'SITUAÇÃO DO COMPONENTE', 'Horas_LDA'] if c in df_alvo.columns]
                     st.dataframe(df_alvo[cols_exist].sort_values('Horas_LDA', ascending=False), use_container_width=True)
+                    st.write(f"**Amostras:** {len(df_alvo)} | **Falhas:** {falhas_count} | **Censuras:** {susp_count}")
                     
                     if falhas_count > 0:
                         wf = WeibullFitter()
@@ -650,7 +661,7 @@ with aba_lda:
                             st.plotly_chart(fig_l1, use_container_width=True)
                         with tab_l2:
                             st.plotly_chart(go.Figure(go.Scatter(x=t_lda, y=wf.hazard_at_times(t_lda), mode='lines', line=dict(color='purple'))), use_container_width=True)
-
+                
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante")
                 component_mttf = calcular_mttf_componentes(df_comp)
