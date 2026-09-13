@@ -74,7 +74,6 @@ def get_pdf_lines(pdf, text, width):
     return lines
 
 def format_date_safe(val):
-    """Função blindada para converter qualquer data/string para o formato DD/MM/YYYY"""
     try:
         if pd.isnull(val) or str(val).strip() in ['NaT', 'nan', 'None', '', '<NA>']:
             return ""
@@ -367,18 +366,28 @@ with aba_estrategia:
             
             with col_grafico:
                 t_plot = np.linspace(0.1, max(tbf_clean_insp)*1.5, 300)
+                # CDF Teórica (Weibull)
                 cdf_plot = st_scipy.weibull_min.cdf(t_plot, shape_i, scale=scale_i) * 100
                 fig_cdf = go.Figure()
-                fig_cdf.add_trace(go.Scatter(x=t_plot, y=cdf_plot, mode='lines', name='Probabilidade F(t) (%)', line=dict(color='blue')))
-                fig_cdf.add_vline(x=B2, line_dash="dash", line_color="red", annotation_text="B2 (2%)")
-                fig_cdf.add_vline(x=B10, line_dash="dash", line_color="orange", annotation_text="B10 (10%)")
-                fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF")
+                fig_cdf.add_trace(go.Scatter(x=t_plot, y=cdf_plot, mode='lines', name='CDF Teórica (Weibull)', line=dict(color='blue')))
+                
+                # Adição da CDF Empírica (Kaplan-Meier - Dados Reais)
+                kmf_i = KaplanMeierFitter()
+                kmf_i.fit(tbf_clean_insp, event_observed=np.ones_like(tbf_clean_insp))
+                emp_f = (1 - kmf_i.survival_function_['KM_estimate']) * 100
+                fig_cdf.add_trace(go.Scatter(x=emp_f.index, y=emp_f.values, mode='markers', name='CDF Empírica (Dados Reais)', marker=dict(color='black', symbol='circle', size=6)))
+
+                # Marcações com posições alternadas para evitar sobreposição
+                fig_cdf.add_vline(x=B2, line_dash="dash", line_color="red", annotation_text="B2 (2%)", annotation_position="top left")
+                fig_cdf.add_vline(x=B10, line_dash="dash", line_color="orange", annotation_text="B10 (10%)", annotation_position="top right")
+                fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF", annotation_position="bottom right")
+                
                 fig_cdf.add_hline(y=2, line_dash="dot", line_color="red", opacity=0.5)
                 fig_cdf.add_hline(y=10, line_dash="dot", line_color="orange", opacity=0.5)
-                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)")
+                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t) (CDF)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+15)]))
                 st.plotly_chart(fig_cdf, use_container_width=True)
         else:
-            st.warning("Dados insuficientes para calcular os parâmetros.")
+            st.warning("Dados insuficientes para calcular os parâmetros B2 e B10.")
 
         st.markdown("---")
         st.markdown("### 🛠️ 3. As 5 Etapas do Tempo Ótimo de Reparo (ORT)")
@@ -421,27 +430,30 @@ with aba_plano_acao:
     
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # Nomes fixos EXATOS para evitar criação de colunas duplicadas
     colunas_5w2h = [
-        "NOME DO CONTRATO", "What? (O que)", "Why? (Por que)", 
-        "Where? (Onde)", "When? (Prazo)", "Prazo Original", 
+        "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
+        "Where? (Onde/Equipamento)", "When? (Prazo)", "Prazo Original", 
         "Who? (Responsável)", "How? (Como)", "How Much? (Custo Estimado)", 
         "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
     ]
     
     try:
         df_acao = conn.read(spreadsheet=url_planilha)
-        # Força o uso EXCLUSIVO das colunas que definimos acima
         for col in colunas_5w2h:
             if col not in df_acao.columns:
                 df_acao[col] = ""
-        # Descarta "colunas fantasma" antigas
         df_acao = df_acao[colunas_5w2h]
     except Exception:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    # Conversão de Datas Segura para o Editor
+    # Conversão super blindada para não virar float64: Força TUDO a ser string limpa primeiro
+    for col in colunas_5w2h:
+        if col not in ['When? (Prazo)', 'Prazo Original', 'Nova Data']:
+            df_acao[col] = df_acao[col].astype(str).replace({'nan': '', 'None': '', '<NA>': '', 'NaN': ''})
+
+    df_acao['How Much? (Custo Estimado)'] = pd.to_numeric(df_acao['How Much? (Custo Estimado)'], errors='coerce')
+    
     df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], format='%d/%m/%Y', errors='coerce').dt.date
     df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], format='%d/%m/%Y', errors='coerce').dt.date
     df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], format='%d/%m/%Y', errors='coerce').dt.date
@@ -462,22 +474,31 @@ with aba_plano_acao:
 
     st.markdown("Edite a tabela abaixo e clique em **Salvar no Google Sheets**.")
     
+    # Configuração Explícita garantindo que a coluna What nunca mais seja numérica
     df_editado = st.data_editor(
         df_display, 
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
+            "NOME DO CONTRATO": st.column_config.TextColumn("NOME DO CONTRATO"),
+            "What? (O que será feito)": st.column_config.TextColumn("What? (O que será feito)"),
+            "Why? (Por que)": st.column_config.TextColumn("Why? (Por que)"),
+            "Where? (Onde/Equipamento)": st.column_config.TextColumn("Where? (Onde/Equipamento)"),
+            "Who? (Responsável)": st.column_config.TextColumn("Who? (Responsável)"),
+            "How? (Como)": st.column_config.TextColumn("How? (Como)"),
+            "How Much? (Custo Estimado)": st.column_config.NumberColumn("How Much? (Custo Estimado)"),
             "When? (Prazo)": st.column_config.DateColumn("When? (Prazo)", format="DD/MM/YYYY"),
             "Prazo Original": st.column_config.DateColumn("Prazo Original", format="DD/MM/YYYY", disabled=True),
             "Nova Data": st.column_config.DateColumn("Nova Data", format="DD/MM/YYYY"),
             "Status": st.column_config.SelectboxColumn("Status", options=["Concluído", "Em Andamento", "Reprogramado", "Atrasado"], required=False),
+            "Motivo": st.column_config.TextColumn("Motivo"),
             "Dias de Atraso": st.column_config.TextColumn("Dias de Atraso", disabled=True),
             "Histórico": st.column_config.TextColumn("Histórico", disabled=True)
         }
     )
     
     if st.button("💾 Salvar no Google Sheets (via Apps Script)"):
-        # Validação de Reprogramado/Atrasado
+        # Validação Exigência de Reprogramação
         linhas_invalidas = df_editado[
             (df_editado['Status'].isin(['Reprogramado', 'Atrasado'])) & 
             ((df_editado['Motivo'].isna()) | (df_editado['Motivo'] == "") | (df_editado['Nova Data'].isna()))
@@ -489,6 +510,10 @@ with aba_plano_acao:
             with st.spinner("Processando Auditoria e Enviando..."):
                 try:
                     hoje = datetime.now().strftime('%d/%m/%Y')
+                    
+                    # Garantir que a coluna Histórico não é vista como Float64 antes do loop
+                    df_editado['Histórico'] = df_editado['Histórico'].astype(str).replace({'nan': '', 'None': '', '<NA>': ''})
+                    df_editado['Dias de Atraso'] = df_editado['Dias de Atraso'].astype(str).replace({'nan': '', 'None': '', '<NA>': ''})
                     
                     for idx, row in df_editado.iterrows():
                         # REGRA 1: Travar Prazo Original
@@ -502,8 +527,6 @@ with aba_plano_acao:
                             if pd.notnull(prazo_orig) and pd.notnull(nova_dt):
                                 atraso = (nova_dt - prazo_orig).days
                                 df_editado.at[idx, 'Dias de Atraso'] = str(atraso) if atraso > 0 else "0"
-                            else:
-                                df_editado.at[idx, 'Dias de Atraso'] = ""
                         except Exception:
                             pass
                         
@@ -513,7 +536,6 @@ with aba_plano_acao:
                         
                         if new_status != old_status and new_status in ['Reprogramado', 'Atrasado']:
                             hist = str(row.get('Histórico', ''))
-                            if hist in ["nan", "None", "<NA>", ""]: hist = ""
                             try:
                                 nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y')
                             except:
@@ -521,7 +543,6 @@ with aba_plano_acao:
                             novo_reg = f"[{hoje}] Mudou p/ {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
                             df_editado.at[idx, 'Histórico'] = (hist + " | " + novo_reg).strip(" | ")
 
-                    # Aplica a função blindada de datas p/ transformar de volta em texto
                     df_editado['When? (Prazo)'] = df_editado['When? (Prazo)'].apply(format_date_safe)
                     df_editado['Prazo Original'] = df_editado['Prazo Original'].apply(format_date_safe)
                     df_editado['Nova Data'] = df_editado['Nova Data'].apply(format_date_safe)
@@ -530,14 +551,12 @@ with aba_plano_acao:
                     df_acao['Prazo Original'] = df_acao['Prazo Original'].apply(format_date_safe)
                     df_acao['Nova Data'] = df_acao['Nova Data'].apply(format_date_safe)
 
-                    # Merge robusto
-                    df_editado = df_editado.astype(str)
                     df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
                     df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
                     
-                    # LIMPEZA FINAL ANTI-NaN (JSON COMPLIANT)
-                    df_final = df_final.fillna("")
-                    df_final = df_final.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': '', 'NaN': ''})
+                    # SUPER LIMPEZA JSON: Varre coluna a coluna e mata qualquer NaN para não crashear
+                    for col in df_final.columns:
+                        df_final[col] = df_final[col].astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': '', 'NaN': ''})
                     
                     dados_json = df_final.to_dict(orient="records")
                     resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
