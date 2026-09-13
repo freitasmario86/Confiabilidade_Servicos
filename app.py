@@ -65,7 +65,6 @@ def remove_accents(input_str):
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def get_pdf_lines(pdf, text, width):
-    """Calcula matematicamente as quebras de linha para a célula do PDF"""
     if pd.isna(text) or str(text).strip() == "" or str(text) in ["nan", "None", "<NA>"]:
         return 1
     text = str(text)
@@ -73,6 +72,15 @@ def get_pdf_lines(pdf, text, width):
     for paragraph in text.split('\n'):
         lines += max(1, math.ceil(pdf.get_string_width(paragraph) / (width - 2)))
     return lines
+
+def format_date_safe(val):
+    """Função blindada para converter qualquer data/string para o formato DD/MM/YYYY"""
+    try:
+        if pd.isnull(val) or str(val).strip() in ['NaT', 'nan', 'None', '', '<NA>']:
+            return ""
+        return pd.to_datetime(val).strftime('%d/%m/%Y')
+    except:
+        return ""
 
 # --- NAVEGAÇÃO POR ABAS PRINCIPAIS ---
 aba_dashboard, aba_ia, aba_estrategia, aba_plano_acao, aba_lda = st.tabs([
@@ -367,7 +375,7 @@ with aba_estrategia:
                 fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF")
                 fig_cdf.add_hline(y=2, line_dash="dot", line_color="red", opacity=0.5)
                 fig_cdf.add_hline(y=10, line_dash="dot", line_color="orange", opacity=0.5)
-                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+5)]))
+                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)")
                 st.plotly_chart(fig_cdf, use_container_width=True)
         else:
             st.warning("Dados insuficientes para calcular os parâmetros.")
@@ -413,30 +421,27 @@ with aba_plano_acao:
     
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # Nomes rigorosos
+    # Nomes fixos EXATOS para evitar criação de colunas duplicadas
     colunas_5w2h = [
-        "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
-        "Where? (Onde/Equipamento)", "When? (Prazo)", "Prazo Original", 
+        "NOME DO CONTRATO", "What? (O que)", "Why? (Por que)", 
+        "Where? (Onde)", "When? (Prazo)", "Prazo Original", 
         "Who? (Responsável)", "How? (Como)", "How Much? (Custo Estimado)", 
         "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
     ]
     
     try:
         df_acao = conn.read(spreadsheet=url_planilha)
-        if df_acao.empty or len(df_acao.columns) < 5:
-            df_acao = pd.DataFrame(columns=colunas_5w2h)
-            df_acao.loc[0] = [""] * len(colunas_5w2h)
-        else:
-            for col in colunas_5w2h:
-                if col not in df_acao.columns:
-                    df_acao[col] = ""
+        # Força o uso EXCLUSIVO das colunas que definimos acima
+        for col in colunas_5w2h:
+            if col not in df_acao.columns:
+                df_acao[col] = ""
+        # Descarta "colunas fantasma" antigas
+        df_acao = df_acao[colunas_5w2h]
     except Exception:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    # Limpeza absoluta p/ evitar Float64
-    df_acao = df_acao.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
-
+    # Conversão de Datas Segura para o Editor
     df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], format='%d/%m/%Y', errors='coerce').dt.date
     df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], format='%d/%m/%Y', errors='coerce').dt.date
     df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], format='%d/%m/%Y', errors='coerce').dt.date
@@ -446,8 +451,8 @@ with aba_plano_acao:
     contratos_disp = df_acao["NOME DO CONTRATO"].dropna().astype(str).unique().tolist()
     status_disp = df_acao["Status"].dropna().astype(str).unique().tolist()
     
-    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != ""])
-    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != ""])
+    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c not in ["", "nan", "None", "<NA>"]])
+    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s not in ["", "nan", "None", "<NA>"]])
     
     df_display = df_acao.copy()
     if filtro_contrato:
@@ -472,6 +477,7 @@ with aba_plano_acao:
     )
     
     if st.button("💾 Salvar no Google Sheets (via Apps Script)"):
+        # Validação de Reprogramado/Atrasado
         linhas_invalidas = df_editado[
             (df_editado['Status'].isin(['Reprogramado', 'Atrasado'])) & 
             ((df_editado['Motivo'].isna()) | (df_editado['Motivo'] == "") | (df_editado['Nova Data'].isna()))
@@ -507,32 +513,32 @@ with aba_plano_acao:
                         
                         if new_status != old_status and new_status in ['Reprogramado', 'Atrasado']:
                             hist = str(row.get('Histórico', ''))
-                            if hist in ["nan", "None", "<NA>"]: hist = ""
+                            if hist in ["nan", "None", "<NA>", ""]: hist = ""
                             try:
                                 nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y')
                             except:
                                 nova_dt_str = ""
-                            novo_reg = f"[{hoje}] Mudou para {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
+                            novo_reg = f"[{hoje}] Mudou p/ {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
                             df_editado.at[idx, 'Histórico'] = (hist + " | " + novo_reg).strip(" | ")
 
-                    # Formata datas para String antes do Merge
-                    df_editado['When? (Prazo)'] = pd.to_datetime(df_editado['When? (Prazo)'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_editado['Prazo Original'] = pd.to_datetime(df_editado['Prazo Original'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    # Aplica a função blindada de datas p/ transformar de volta em texto
+                    df_editado['When? (Prazo)'] = df_editado['When? (Prazo)'].apply(format_date_safe)
+                    df_editado['Prazo Original'] = df_editado['Prazo Original'].apply(format_date_safe)
+                    df_editado['Nova Data'] = df_editado['Nova Data'].apply(format_date_safe)
                     
-                    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_acao['When? (Prazo)'] = df_acao['When? (Prazo)'].apply(format_date_safe)
+                    df_acao['Prazo Original'] = df_acao['Prazo Original'].apply(format_date_safe)
+                    df_acao['Nova Data'] = df_acao['Nova Data'].apply(format_date_safe)
 
                     # Merge robusto
-                    df_editado = df_editado.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
+                    df_editado = df_editado.astype(str)
                     df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
                     df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
                     
-                    # Limpeza Final Anti-Float64
-                    df_final = df_final.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
+                    # LIMPEZA FINAL ANTI-NaN (JSON COMPLIANT)
+                    df_final = df_final.fillna("")
+                    df_final = df_final.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': '', 'NaN': ''})
                     
-                    import requests
                     dados_json = df_final.to_dict(orient="records")
                     resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
                     
@@ -540,9 +546,9 @@ with aba_plano_acao:
                         st.success("✅ Dados salvos e auditados no Google Sheets!")
                         st.cache_data.clear()
                     else:
-                        st.error(f"Erro do servidor: {resposta.text}")
+                        st.error(f"Erro do servidor Google: {resposta.text}")
                 except Exception as e:
-                    st.error(f"⚠️ Erro ao processar/salvar: {e}")
+                    st.error(f"⚠️ Erro crítico ao processar JSON: {e}")
 
     # --- EXPORTAÇÃO EXCEL E PDF ---
     st.markdown("---")
@@ -563,7 +569,6 @@ with aba_plano_acao:
             pdf.cell(0, 10, "Plano de Acao 5W2H", ln=True, align='C')
             
             pdf.set_font("Arial", 'B', 7)
-            # 14 Colunas. Largura total disponível = 277mm
             pdf_headers = ["Contrato", "O que", "Por que", "Onde", "When", "Prazo Orig.", "Resp.", "Como", "Custo", "Status", "Motivo", "Nova Dt.", "Atr.", "Historico"]
             col_widths = [15, 20, 20, 15, 16, 16, 15, 25, 12, 18, 25, 16, 10, 45] 
             
@@ -696,6 +701,7 @@ with aba_lda:
                         
                         df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
                         df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
+                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
                         st.dataframe(df_mttf_display, use_container_width=True)
             else:
                 st.error("Colunas obrigatórias ausentes.")
