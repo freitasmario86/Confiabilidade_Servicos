@@ -7,10 +7,8 @@ import scipy.stats as st_scipy
 from scipy.stats import poisson
 from scipy.special import gamma
 import io
-import os
 import math
 from datetime import datetime
-import tempfile
 import warnings
 import unicodedata
 import requests
@@ -68,7 +66,7 @@ def remove_accents(input_str):
 
 def get_pdf_lines(pdf, text, width):
     """Calcula matematicamente as quebras de linha para a célula do PDF"""
-    if pd.isna(text) or str(text).strip() == "" or str(text) == "nan":
+    if pd.isna(text) or str(text).strip() == "" or str(text) in ["nan", "None", "<NA>"]:
         return 1
     text = str(text)
     lines = 0
@@ -124,7 +122,6 @@ with aba_dashboard:
         else:
             df_filtered = df_cascaded.copy()
 
-        # --- KPIs BÁSICOS E Ai ---
         st.markdown("---")
         st.markdown("### 📊 Indicadores Principais")
         
@@ -151,7 +148,6 @@ with aba_dashboard:
         col4.metric("% Prev. (Global Frota)", f"{perc_prev:.1f}%")
         col5.metric("% Corr. (Global Frota)", f"{perc_corr:.1f}%")
 
-        # --- EVOLUÇÃO E RESPONSABILIDADE ---
         st.markdown("---")
         col_evol, col_resp = st.columns([2, 1])
         with col_evol:
@@ -181,7 +177,6 @@ with aba_dashboard:
                 fig_resp.update_layout(yaxis={'categoryorder': 'total ascending'})
                 st.plotly_chart(fig_resp, use_container_width=True)
 
-        # --- JACK-KNIFE, MTBF E MTTR DINÂMICO ---
         st.markdown("---")
         st.markdown("### 🚜 Análise Dinâmica: Jack-Knife, MTBF e MTTR")
         dimensao = st.radio("Selecione a Dimensão de Análise:", ["EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
@@ -227,7 +222,6 @@ with aba_dashboard:
                 fig_mttr.update_traces(textposition='outside')
                 st.plotly_chart(fig_mttr, use_container_width=True)
 
-        # --- PARETO ---
         st.markdown("---")
         st.markdown("### 📉 Perfil de Perdas (Pareto - Top 18)")
         def plot_pareto(data, col_name, title):
@@ -246,70 +240,8 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
-        # --- CONFIABILIDADE DINÂMICA (Weibull e RGA) ---
-        st.markdown("---")
-        st.markdown("### 📈 Confiabilidade Dinâmica (Weibull) e RGA")
-        
-        dim_conf = st.radio("Nível de Análise de Confiabilidade:", ["FROTA GERAL", "EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
-        df_conf = corretivas.copy()
-        
-        if dim_conf != "FROTA GERAL":
-            opcoes_conf = df_conf[dim_conf].dropna().astype(str).unique().tolist()
-            opcoes_conf.sort()
-            alvo_conf = st.selectbox(f"Selecione o {dim_conf.title()} alvo:", opcoes_conf)
-            df_conf = df_conf[df_conf[dim_conf] == alvo_conf]
-
-        if not df_conf.empty:
-            tbf_data = df_conf.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
-            tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
-            tbf_clean = tbf_data['TBF'].dropna()
-            tbf_clean = tbf_clean[tbf_clean > 0].values
-
-            if len(tbf_clean) > 3:
-                shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
-                beta = shape
-                eta = scale
-                
-                st.success(f"**Distribuição Utilizada:** Weibull | **Forma ($\\beta$):** {beta:.3f} | **Vida Característica ($\\eta$):** {eta:.2f} horas")
-
-                t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
-                reliability = st_scipy.weibull_min.sf(t, shape, loc=0, scale=scale)
-                prob_failure = st_scipy.weibull_min.cdf(t, shape, loc=0, scale=scale)
-                hazard_rate = st_scipy.weibull_min.pdf(t, shape, loc=0, scale=scale) / reliability
-                hazard_rate[np.isinf(hazard_rate)] = 0
-
-                tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade F(t)", "Taxa de Falha h(t)", "RGA"])
-
-                def setup_hover(fig):
-                    fig.update_layout(hovermode="x unified")
-                    fig.update_xaxes(showspikes=True, spikecolor="gray", spikesnap="cursor", spikemode="across")
-                    return fig
-
-                with tab_r1:
-                    fig_rel = go.Figure(go.Scatter(x=t, y=reliability, mode='lines', line=dict(color='green')))
-                    fig_rel.update_layout(title=f"Curva de Confiabilidade R(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="R(t)")
-                    st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
-
-                with tab_r2:
-                    fig_prob = go.Figure(go.Scatter(x=t, y=prob_failure, mode='lines', line=dict(color='red')))
-                    fig_prob.update_layout(title=f"Probabilidade de Falha F(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="F(t)")
-                    st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
-
-                with tab_r3:
-                    fig_haz = go.Figure(go.Scatter(x=t, y=hazard_rate, mode='lines', line=dict(color='orange')))
-                    fig_haz.update_layout(title=f"Taxa de Falha h(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
-                    st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
-
-                with tab_r4:
-                    tbf_data['Tempo Acumulado'] = tbf_data['TOTAL HORAS DECIMAIS'].cumsum()
-                    tbf_data['Falhas Acumuladas'] = range(1, len(tbf_data) + 1)
-                    tbf_data['MTBF Acumulado'] = tbf_data['Tempo Acumulado'] / tbf_data['Falhas Acumuladas']
-                    fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title=f"RGA - Crescimento da Confiabilidade ({dim_conf})", markers=True)
-                    st.plotly_chart(setup_hover(fig_rga), use_container_width=True)
-            else:
-                st.warning("Dados de TBF insuficientes (mínimo de 4 ocorrências exigidas).")
     else:
-        st.info("Faça o upload da Planilha de OS para iniciar o Dashboard.")
+        st.info("Faça o upload da Planilha de Ordens de Serviço (OS).")
 
 # =====================================================================
 # ABA 2: IA & CONFIABILIDADE AVANÇADA
@@ -395,7 +327,7 @@ with aba_estrategia:
             
             lambda_expected = (horas_projecao / mtbf_spare) * qtd_ativos_spare
             estoque_recomendado = poisson.ppf(0.95, lambda_expected)
-            st.success(f"🛒 **Estoque Recomendado (95% de Segurança): {int(estoque_recomendado)} unidades** (Demanda Média: {lambda_expected:.1f} falhas)")
+            st.success(f"🛒 **Estoque Recomendado (95% Segurança): {int(estoque_recomendado)} unidades** (Demanda Média: {lambda_expected:.1f} falhas)")
         else:
             st.warning("Selecione os filtros acima até chegar no item alvo.")
 
@@ -438,7 +370,7 @@ with aba_estrategia:
                 fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+5)]))
                 st.plotly_chart(fig_cdf, use_container_width=True)
         else:
-            st.warning("Dados insuficientes para calcular os parâmetros B2 e B10.")
+            st.warning("Dados insuficientes para calcular os parâmetros.")
 
         st.markdown("---")
         st.markdown("### 🛠️ 3. As 5 Etapas do Tempo Ótimo de Reparo (ORT)")
@@ -471,7 +403,7 @@ with aba_estrategia:
         st.info("Carregue a planilha na aba principal.")
 
 # =====================================================================
-# ABA 4: PLANO DE AÇÃO 5W2H (Integração e Exportação Avançada)
+# ABA 4: PLANO DE AÇÃO 5W2H (Integração e Auditoria)
 # =====================================================================
 with aba_plano_acao:
     st.header("📋 Plano de Ação 5W2H")
@@ -481,10 +413,12 @@ with aba_plano_acao:
     
     conn = st.connection("gsheets", type=GSheetsConnection)
     
+    # Nomes rigorosos
     colunas_5w2h = [
         "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
-        "Where? (Onde/Equipamento)", "Prazo Original", "Who? (Responsável)", 
-        "How? (Como)", "How Much? (Custo Estimado)", "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
+        "Where? (Onde/Equipamento)", "When? (Prazo)", "Prazo Original", 
+        "Who? (Responsável)", "How? (Como)", "How Much? (Custo Estimado)", 
+        "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
     ]
     
     try:
@@ -500,7 +434,10 @@ with aba_plano_acao:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    # Convertendo as datas recebidas para o formato adequado do Streamlit Editor
+    # Limpeza absoluta p/ evitar Float64
+    df_acao = df_acao.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
+
+    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], format='%d/%m/%Y', errors='coerce').dt.date
     df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], format='%d/%m/%Y', errors='coerce').dt.date
     df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], format='%d/%m/%Y', errors='coerce').dt.date
 
@@ -509,8 +446,8 @@ with aba_plano_acao:
     contratos_disp = df_acao["NOME DO CONTRATO"].dropna().astype(str).unique().tolist()
     status_disp = df_acao["Status"].dropna().astype(str).unique().tolist()
     
-    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != "nan" and c != ""])
-    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != "nan" and s != ""])
+    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != ""])
+    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != ""])
     
     df_display = df_acao.copy()
     if filtro_contrato:
@@ -525,7 +462,8 @@ with aba_plano_acao:
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
-            "Prazo Original": st.column_config.DateColumn("Prazo Original", format="DD/MM/YYYY"),
+            "When? (Prazo)": st.column_config.DateColumn("When? (Prazo)", format="DD/MM/YYYY"),
+            "Prazo Original": st.column_config.DateColumn("Prazo Original", format="DD/MM/YYYY", disabled=True),
             "Nova Data": st.column_config.DateColumn("Nova Data", format="DD/MM/YYYY"),
             "Status": st.column_config.SelectboxColumn("Status", options=["Concluído", "Em Andamento", "Reprogramado", "Atrasado"], required=False),
             "Dias de Atraso": st.column_config.TextColumn("Dias de Atraso", disabled=True),
@@ -540,45 +478,59 @@ with aba_plano_acao:
         ]
         
         if not linhas_invalidas.empty:
-            st.error("⚠️ **Atenção:** Ações 'Reprogramadas' ou 'Atrasadas' exigem o preenchimento de 'Motivo' e 'Nova Data'.")
+            st.error("⚠️ **Atenção:** Ações 'Reprogramadas' ou 'Atrasadas' exigem 'Motivo' e 'Nova Data'.")
         else:
             with st.spinner("Processando Auditoria e Enviando..."):
                 try:
                     hoje = datetime.now().strftime('%d/%m/%Y')
                     
                     for idx, row in df_editado.iterrows():
+                        # REGRA 1: Travar Prazo Original
+                        if pd.isnull(row['Prazo Original']) and pd.notnull(row['When? (Prazo)']):
+                            df_editado.at[idx, 'Prazo Original'] = row['When? (Prazo)']
+                            
+                        # REGRA 2: Calcular Atraso
                         try:
-                            prazo = pd.to_datetime(row['Prazo Original'])
-                            nova = pd.to_datetime(row['Nova Data'])
-                            if pd.notnull(prazo) and pd.notnull(nova):
-                                atraso = (nova - prazo).days
+                            prazo_orig = pd.to_datetime(df_editado.at[idx, 'Prazo Original'])
+                            nova_dt = pd.to_datetime(row['Nova Data'])
+                            if pd.notnull(prazo_orig) and pd.notnull(nova_dt):
+                                atraso = (nova_dt - prazo_orig).days
                                 df_editado.at[idx, 'Dias de Atraso'] = str(atraso) if atraso > 0 else "0"
+                            else:
+                                df_editado.at[idx, 'Dias de Atraso'] = ""
                         except Exception:
                             pass
                         
-                        if idx in df_acao.index:
-                            old_status = str(df_acao.loc[idx, 'Status'])
-                            new_status = str(row['Status'])
-                            if new_status != old_status and new_status in ['Reprogramado', 'Atrasado']:
-                                hist = str(row.get('Histórico', ''))
-                                if hist == "nan" or hist == "None": hist = ""
-                                try:
-                                    nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y')
-                                except:
-                                    nova_dt_str = ""
-                                novo_reg = f"[{hoje}] Mudou para {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
-                                df_editado.at[idx, 'Histórico'] = (hist + " | " + novo_reg).strip(" | ")
+                        # REGRA 3: Histórico de Alteração
+                        old_status = str(df_acao.loc[idx, 'Status']) if idx in df_acao.index else ""
+                        new_status = str(row.get('Status', ''))
+                        
+                        if new_status != old_status and new_status in ['Reprogramado', 'Atrasado']:
+                            hist = str(row.get('Histórico', ''))
+                            if hist in ["nan", "None", "<NA>"]: hist = ""
+                            try:
+                                nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y')
+                            except:
+                                nova_dt_str = ""
+                            novo_reg = f"[{hoje}] Mudou para {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
+                            df_editado.at[idx, 'Histórico'] = (hist + " | " + novo_reg).strip(" | ")
 
-                    df_editado['Prazo Original'] = pd.to_datetime(df_editado['Prazo Original'], errors='coerce').dt.strftime('%d/%m/%Y')
-                    df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data'], errors='coerce').dt.strftime('%d/%m/%Y')
+                    # Formata datas para String antes do Merge
+                    df_editado['When? (Prazo)'] = pd.to_datetime(df_editado['When? (Prazo)'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_editado['Prazo Original'] = pd.to_datetime(df_editado['Prazo Original'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
                     
+                    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], errors='coerce').dt.strftime('%d/%m/%Y').replace('NaT', '')
+
+                    # Merge robusto
+                    df_editado = df_editado.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
                     df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
                     df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
                     
-                    # == LIMPEZA DO NaN PARA O JSON ==
-                    df_final = df_final.fillna("")
-                    df_final = df_final.astype(str)
-                    df_final = df_final.replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
+                    # Limpeza Final Anti-Float64
+                    df_final = df_final.astype(str).replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
                     
                     import requests
                     dados_json = df_final.to_dict(orient="records")
@@ -594,7 +546,7 @@ with aba_plano_acao:
 
     # --- EXPORTAÇÃO EXCEL E PDF ---
     st.markdown("---")
-    st.markdown("### 📥 Exportar Plano de Ação (Filtrado)")
+    st.markdown("### 📥 Exportar Plano de Ação")
     col_d1, col_d2 = st.columns(2)
     
     with col_d1:
@@ -611,19 +563,20 @@ with aba_plano_acao:
             pdf.cell(0, 10, "Plano de Acao 5W2H", ln=True, align='C')
             
             pdf.set_font("Arial", 'B', 7)
-            pdf_headers = ["Contrato", "O que", "Por que", "Onde", "Prazo", "Resp.", "Como", "Custo", "Status", "Motivo", "Nova Data", "Atraso", "Historico"]
-            col_widths = [15, 25, 20, 15, 16, 15, 25, 15, 18, 25, 16, 12, 60] 
+            # 14 Colunas. Largura total disponível = 277mm
+            pdf_headers = ["Contrato", "O que", "Por que", "Onde", "When", "Prazo Orig.", "Resp.", "Como", "Custo", "Status", "Motivo", "Nova Dt.", "Atr.", "Historico"]
+            col_widths = [15, 20, 20, 15, 16, 16, 15, 25, 12, 18, 25, 16, 10, 45] 
             
             max_lines = 1
             for i, col in enumerate(pdf_headers):
                 lines = get_pdf_lines(pdf, remove_accents(col), col_widths[i])
                 if lines > max_lines: max_lines = lines
             row_height = max_lines * 4
+            
             x, y = pdf.get_x(), pdf.get_y()
             for i, col in enumerate(pdf_headers):
-                pdf.rect(x, y, col_widths[i], row_height)
                 pdf.set_xy(x, y)
-                pdf.multi_cell(col_widths[i], 4, remove_accents(col), border=0, align='L')
+                pdf.multi_cell(col_widths[i], 4, remove_accents(col), border=1, align='C')
                 x += col_widths[i]
             pdf.set_y(y + row_height)
             
@@ -644,9 +597,8 @@ with aba_plano_acao:
                     x, y = pdf.get_x(), pdf.get_y()
                     
                 for i, text in enumerate(row_data):
-                    pdf.rect(x, y, col_widths[i], row_height)
                     pdf.set_xy(x, y)
-                    pdf.multi_cell(col_widths[i], 4, text, border=0, align='L')
+                    pdf.multi_cell(col_widths[i], 4, text, border=1, align='L')
                     x += col_widths[i]
                 pdf.set_y(y + row_height)
             
@@ -744,7 +696,6 @@ with aba_lda:
                         
                         df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
                         df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
-                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
                         st.dataframe(df_mttf_display, use_container_width=True)
             else:
                 st.error("Colunas obrigatórias ausentes.")
