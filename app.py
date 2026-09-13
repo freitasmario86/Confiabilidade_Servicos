@@ -7,10 +7,18 @@ import scipy.stats as st_scipy
 from scipy.stats import poisson
 from scipy.special import gamma
 import io
+import os
+import tempfile
 import warnings
-from streamlit_gsheets import GSheetsConnection
+import unicodedata
 import requests
-import json
+from streamlit_gsheets import GSheetsConnection
+
+try:
+    from fpdf import FPDF
+    FPDF_INSTALLED = True
+except ImportError:
+    FPDF_INSTALLED = False
 
 try:
     from lifelines import WeibullFitter, KaplanMeierFitter
@@ -23,7 +31,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Dashboard de Manutenção CIM", layout="wide", page_icon="⚙️")
 
 # =====================================================================
-# FUNÇÕES DE CACHE
+# FUNÇÕES DE CACHE & UTILIDADES
 # =====================================================================
 @st.cache_data
 def carregar_dados_os(file):
@@ -51,6 +59,10 @@ def calcular_mttf_componentes(df_comp):
             except Exception:
                 pass
     return component_mttf
+
+def remove_accents(input_str):
+    nfkd_form = unicodedata.normalize('NFKD', str(input_str))
+    return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 # --- NAVEGAÇÃO POR ABAS PRINCIPAIS ---
 aba_dashboard, aba_ia, aba_estrategia, aba_plano_acao, aba_lda = st.tabs([
@@ -224,11 +236,73 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
+        # --- CONFIABILIDADE DINÂMICA (Weibull e RGA) ---
+        st.markdown("---")
+        st.markdown("### 📈 Confiabilidade Dinâmica (Weibull) e RGA")
+        
+        dim_conf = st.radio("Nível de Análise de Confiabilidade:", ["FROTA GERAL", "EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
+        df_conf = corretivas.copy()
+        
+        if dim_conf != "FROTA GERAL":
+            opcoes_conf = df_conf[dim_conf].dropna().astype(str).unique().tolist()
+            opcoes_conf.sort()
+            alvo_conf = st.selectbox(f"Selecione o {dim_conf.title()} alvo:", opcoes_conf)
+            df_conf = df_conf[df_conf[dim_conf] == alvo_conf]
+
+        if not df_conf.empty:
+            tbf_data = df_conf.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
+            tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
+            tbf_clean = tbf_data['TBF'].dropna()
+            tbf_clean = tbf_clean[tbf_clean > 0].values
+
+            if len(tbf_clean) > 3:
+                shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
+                beta = shape
+                eta = scale
+                
+                st.success(f"**Distribuição Utilizada:** Weibull | **Forma ($\\beta$):** {beta:.3f} | **Vida Característica ($\\eta$):** {eta:.2f} horas")
+
+                t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
+                reliability = st_scipy.weibull_min.sf(t, shape, loc=0, scale=scale)
+                prob_failure = st_scipy.weibull_min.cdf(t, shape, loc=0, scale=scale)
+                hazard_rate = st_scipy.weibull_min.pdf(t, shape, loc=0, scale=scale) / reliability
+                hazard_rate[np.isinf(hazard_rate)] = 0
+
+                tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade F(t)", "Taxa de Falha h(t)", "RGA"])
+
+                def setup_hover(fig):
+                    fig.update_layout(hovermode="x unified")
+                    fig.update_xaxes(showspikes=True, spikecolor="gray", spikesnap="cursor", spikemode="across")
+                    return fig
+
+                with tab_r1:
+                    fig_rel = go.Figure(go.Scatter(x=t, y=reliability, mode='lines', line=dict(color='green')))
+                    fig_rel.update_layout(title=f"Curva de Confiabilidade R(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="R(t)")
+                    st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
+
+                with tab_r2:
+                    fig_prob = go.Figure(go.Scatter(x=t, y=prob_failure, mode='lines', line=dict(color='red')))
+                    fig_prob.update_layout(title=f"Probabilidade de Falha F(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="F(t)")
+                    st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
+
+                with tab_r3:
+                    fig_haz = go.Figure(go.Scatter(x=t, y=hazard_rate, mode='lines', line=dict(color='orange')))
+                    fig_haz.update_layout(title=f"Taxa de Falha h(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
+                    st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
+
+                with tab_r4:
+                    tbf_data['Tempo Acumulado'] = tbf_data['TOTAL HORAS DECIMAIS'].cumsum()
+                    tbf_data['Falhas Acumuladas'] = range(1, len(tbf_data) + 1)
+                    tbf_data['MTBF Acumulado'] = tbf_data['Tempo Acumulado'] / tbf_data['Falhas Acumuladas']
+                    fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title=f"RGA - Crescimento da Confiabilidade ({dim_conf})", markers=True)
+                    st.plotly_chart(setup_hover(fig_rga), use_container_width=True)
+            else:
+                st.warning("Dados de TBF insuficientes (mínimo de 4 ocorrências exigidas).")
     else:
         st.info("Faça o upload da planilha Excel de OS para iniciar o Dashboard.")
 
 # =====================================================================
-# ABA 2: IA & CONFIABILIDADE AVANÇADA
+# ABA 2: IA & CONFIABILIDADE AVANÇADA (Matriz, Banheira)
 # =====================================================================
 with aba_ia:
     st.header("🧠 Inteligência Artificial & Confiabilidade Avançada")
@@ -249,7 +323,7 @@ with aba_ia:
         fig_fmeca.update_traces(textposition='top center', textfont=dict(size=10, color='black'), cliponaxis=False)
         st.plotly_chart(fig_fmeca, use_container_width=True)
 
-        # --- CURVA DA BANHEIRA E OTIMIZAÇÃO PM ---
+        # --- CURVA DA BANHEIRA ---
         st.markdown("---")
         st.markdown("### 🛁 Curva da Banheira (Diagnóstico de Frota)")
         tbf_data_global = corretivas.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
@@ -271,7 +345,6 @@ with aba_ia:
             fig_haz_g = go.Figure(go.Scatter(x=t_g, y=hazard_rate_g, mode='lines', line=dict(color='orange')))
             fig_haz_g.update_layout(title="Curva da Banheira: Taxa de Falha h(t)", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
             st.plotly_chart(fig_haz_g, use_container_width=True)
-
         else:
             st.warning("Dados de TBF insuficientes.")
     else:
@@ -326,8 +399,9 @@ with aba_estrategia:
         # --- INTERVALO DE INSPEÇÕES COM GRÁFICO ---
         st.markdown("---")
         st.markdown("### 🔍 2. Cálculo de Intervalo de Inspeções (F(t) e MTBF)")
+        st.markdown("Cálculo baseado na probabilidade de falha (Weibull) para definir o timing exato das preventivas e inspeções preditivas.")
         
-        dim_insp = st.selectbox("Nível de Análise:", ["MODELO EQUIPAMENTO", "EQUIPAMENTO", "GRUPO"], key='insp')
+        dim_insp = st.selectbox("Nível para Intervalo de Inspeção:", ["MODELO EQUIPAMENTO", "EQUIPAMENTO", "GRUPO"], key='insp')
         opcoes_insp = corretivas[dim_insp].dropna().unique().tolist()
         alvo_insp = st.selectbox("Selecione o Alvo para Inspeção:", opcoes_insp, key='insp_alvo')
         
@@ -340,6 +414,7 @@ with aba_estrategia:
         if len(tbf_clean_insp) > 3:
             shape_i, loc_i, scale_i = st_scipy.weibull_min.fit(tbf_clean_insp, floc=0)
             
+            # Cálculo de B2 e B10
             B2 = st_scipy.weibull_min.ppf(0.02, shape_i, scale=scale_i)
             B10 = st_scipy.weibull_min.ppf(0.10, shape_i, scale=scale_i)
             mtbf_i = scale_i * gamma(1 + (1/shape_i))
@@ -364,6 +439,7 @@ with aba_estrategia:
                 fig_cdf = go.Figure()
                 fig_cdf.add_trace(go.Scatter(x=t_plot, y=cdf_plot, mode='lines', name='Probabilidade F(t) (%)', line=dict(color='blue')))
                 
+                # Marcações
                 fig_cdf.add_vline(x=B2, line_dash="dash", line_color="red", annotation_text="B2 (2%)")
                 fig_cdf.add_vline(x=B10, line_dash="dash", line_color="orange", annotation_text="B10 (10%)")
                 fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF")
@@ -379,6 +455,7 @@ with aba_estrategia:
         # --- AS 5 ETAPAS DO TEMPO ÓTIMO DE REPARO (ORT) ---
         st.markdown("---")
         st.markdown("### 🛠️ 3. As 5 Etapas do Tempo Ótimo de Reparo (ORT)")
+        st.markdown("Aplicação da Engenharia de Confiabilidade para determinar o momento exato de substituir componentes com o menor custo.")
         
         if len(tbf_clean_insp) > 3:
             st.markdown("**01 - TAXONOMIA**")
@@ -422,35 +499,104 @@ with aba_estrategia:
         st.info("Carregue a planilha na aba principal.")
 
 # =====================================================================
-# ABA 4: PLANO DE AÇÃO 5W2H (Google Sheets Seguro)
+# ABA 4: PLANO DE AÇÃO 5W2H (Integração via Webhook / Apps Script)
 # =====================================================================
 with aba_plano_acao:
     st.header("📋 Plano de Ação 5W2H")
-    url_planilha = "https://docs.google.com/spreadsheets/d/1mrfp_qDdX5_6sJVT5-Gk3NzM3nKqznmlR6rwDsXZN2s/edit?gid=0#gid=0"
-    colunas_5w2h = ["NOME DO CONTRATO", "What?", "Why?", "Where?", "When?", "Who?", "How?", "How Much?", "Status"]
     
-    df_acao = pd.DataFrame(columns=colunas_5w2h)
-    df_acao.loc[0] = [""] * len(colunas_5w2h)
+    URL_APPS_SCRIPT = "https://script.google.com/macros/s/AKfycbwQu0k_oQdCCSvlhz9icieN5xTyk6FQLwdk2IVUWgCEWQsDH6nRyUGl9u7qe-BNtuib7A/exec"
+    url_planilha = "https://docs.google.com/spreadsheets/d/1mrfp_qDdX5_6sJVT5-Gk3NzM3nKqznmlR6rwDsXZN2s/edit?gid=0#gid=0"
+    
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    colunas_5w2h = ["NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", "How? (Como)", "How Much? (Custo Estimado)", "Status"]
     
     try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        df_g = conn.read(spreadsheet=url_planilha)
-        if not df_g.empty and len(df_g.columns) >= 2:
-            df_acao = df_g
+        df_acao = conn.read(spreadsheet=url_planilha)
+        if df_acao.empty or len(df_acao.columns) < 2:
+            df_acao = pd.DataFrame(columns=colunas_5w2h)
+            df_acao.loc[0] = [""] * len(colunas_5w2h)
     except Exception:
-        pass 
+        df_acao = pd.DataFrame(columns=colunas_5w2h)
+        df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    df_editado = st.data_editor(df_acao, num_rows="dynamic", use_container_width=True)
+    # --- FILTROS DO 5W2H ---
+    st.markdown("#### Filtros do Plano de Ação")
+    col_f1, col_f2 = st.columns(2)
+    contratos_disp = df_acao["NOME DO CONTRATO"].dropna().astype(str).unique().tolist()
+    status_disp = df_acao["Status"].dropna().astype(str).unique().tolist()
     
-    if st.button("💾 Salvar no Google Sheets"):
-        try:
-            conn.update(spreadsheet=url_planilha, data=df_editado)
-            st.success("Dados salvos no Google Sheets com sucesso!")
-        except Exception:
-            st.error("⚠️ **O Streamlit Cloud bloqueou a gravação.** Adicione as chaves no Secrets ou baixe o CSV.")
+    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", contratos_disp)
+    filtro_status = col_f2.multiselect("Filtrar por Status:", status_disp)
+    
+    df_display = df_acao.copy()
+    if filtro_contrato:
+        df_display = df_display[df_display["NOME DO CONTRATO"].astype(str).isin(filtro_contrato)]
+    if filtro_status:
+        df_display = df_display[df_display["Status"].astype(str).isin(filtro_status)]
+
+    st.markdown("Edite a tabela abaixo e clique em **Salvar no Google Sheets (via Apps Script)**.")
+    df_editado = st.data_editor(df_display, num_rows="dynamic", use_container_width=True)
+    
+    if st.button("💾 Salvar no Google Sheets (via Apps Script)"):
+        with st.spinner("Enviando dados para a nuvem..."):
+            try:
+                # Merge: Preservar as linhas não filtradas e substituir pelas editadas
+                df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
+                df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
+                
+                # Conversão para JSON e envio HTTP POST
+                import requests
+                dados_json = df_final.fillna("").to_dict(orient="records")
+                resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
+                
+                if resposta.status_code == 200:
+                    st.success("✅ Dados salvos com sucesso na planilha via Apps Script!")
+                    st.cache_data.clear()
+                else:
+                    st.error(f"Erro ao salvar: {resposta.text}")
+            except Exception as e:
+                st.error(f"⚠️ Erro de conexão com o Apps Script: {e}")
+
+    # --- EXPORTAÇÃO EXCEL E PDF ---
+    st.markdown("---")
+    st.markdown("### 📥 Exportar Plano de Ação (Filtrado)")
+    col_d1, col_d2 = st.columns(2)
+    
+    with col_d1:
+        excel_data = io.BytesIO()
+        with pd.ExcelWriter(excel_data, engine='openpyxl') as writer:
+            df_editado.to_excel(writer, index=False, sheet_name='5W2H')
+        st.download_button("📊 Baixar em Excel (.xlsx)", data=excel_data.getvalue(), file_name='plano_acao_5w2h.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        
+    with col_d2:
+        if FPDF_INSTALLED:
+            def remove_accents_pdf(input_str):
+                nfkd_form = unicodedata.normalize('NFKD', str(input_str))
+                return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
+                
+            pdf = FPDF(orientation='L') # Paisagem para caber a tabela larga
+            pdf.add_page()
+            pdf.set_font("Arial", 'B', 12)
+            pdf.cell(0, 10, "Plano de Acao 5W2H", ln=True, align='C')
+            pdf.set_font("Arial", 'B', 8)
             
-    csv = df_editado.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Baixar Plano de Ação (CSV)", data=csv, file_name='plano_acao_backup.csv', mime='text/csv')
+            col_widths = [30, 40, 40, 30, 20, 30, 40, 20, 20] # Total = 270mm (Margem Padrão de A4 Paisagem)
+            for i, col in enumerate(colunas_5w2h):
+                pdf.cell(col_widths[i], 8, remove_accents_pdf(col)[:20], border=1)
+            pdf.ln()
+            
+            pdf.set_font("Arial", '', 8)
+            for idx, row in df_editado.iterrows():
+                for i, col in enumerate(colunas_5w2h):
+                    val = str(row.get(col, ""))
+                    val = remove_accents_pdf(val)[:30]
+                    pdf.cell(col_widths[i], 8, val, border=1)
+                pdf.ln()
+            
+            pdf_bytes = pdf.output(dest="S").encode("latin-1", "replace")
+            st.download_button("📄 Baixar em PDF", data=pdf_bytes, file_name='plano_acao_5w2h.pdf', mime='application/pdf')
+        else:
+            st.warning("Biblioteca FPDF não instalada no servidor.")
 
 # =====================================================================
 # ABA 5: CONTROLE DE COMPONENTES E LDA
