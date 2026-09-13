@@ -9,6 +9,8 @@ from scipy.special import gamma
 import io
 import warnings
 from streamlit_gsheets import GSheetsConnection
+import requests
+import json
 
 try:
     from lifelines import WeibullFitter, KaplanMeierFitter
