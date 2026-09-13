@@ -72,7 +72,6 @@ def get_pdf_lines(pdf, text, width):
         return 1
     text = str(text)
     lines = 0
-    # Conta quebras de linha manuais e automáticas
     for paragraph in text.split('\n'):
         lines += max(1, math.ceil(pdf.get_string_width(paragraph) / (width - 2)))
     return lines
@@ -247,8 +246,70 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
+        # --- CONFIABILIDADE DINÂMICA (Weibull e RGA) ---
+        st.markdown("---")
+        st.markdown("### 📈 Confiabilidade Dinâmica (Weibull) e RGA")
+        
+        dim_conf = st.radio("Nível de Análise de Confiabilidade:", ["FROTA GERAL", "EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
+        df_conf = corretivas.copy()
+        
+        if dim_conf != "FROTA GERAL":
+            opcoes_conf = df_conf[dim_conf].dropna().astype(str).unique().tolist()
+            opcoes_conf.sort()
+            alvo_conf = st.selectbox(f"Selecione o {dim_conf.title()} alvo:", opcoes_conf)
+            df_conf = df_conf[df_conf[dim_conf] == alvo_conf]
+
+        if not df_conf.empty:
+            tbf_data = df_conf.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
+            tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
+            tbf_clean = tbf_data['TBF'].dropna()
+            tbf_clean = tbf_clean[tbf_clean > 0].values
+
+            if len(tbf_clean) > 3:
+                shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
+                beta = shape
+                eta = scale
+                
+                st.success(f"**Distribuição Utilizada:** Weibull | **Forma ($\\beta$):** {beta:.3f} | **Vida Característica ($\\eta$):** {eta:.2f} horas")
+
+                t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
+                reliability = st_scipy.weibull_min.sf(t, shape, loc=0, scale=scale)
+                prob_failure = st_scipy.weibull_min.cdf(t, shape, loc=0, scale=scale)
+                hazard_rate = st_scipy.weibull_min.pdf(t, shape, loc=0, scale=scale) / reliability
+                hazard_rate[np.isinf(hazard_rate)] = 0
+
+                tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade F(t)", "Taxa de Falha h(t)", "RGA"])
+
+                def setup_hover(fig):
+                    fig.update_layout(hovermode="x unified")
+                    fig.update_xaxes(showspikes=True, spikecolor="gray", spikesnap="cursor", spikemode="across")
+                    return fig
+
+                with tab_r1:
+                    fig_rel = go.Figure(go.Scatter(x=t, y=reliability, mode='lines', line=dict(color='green')))
+                    fig_rel.update_layout(title=f"Curva de Confiabilidade R(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="R(t)")
+                    st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
+
+                with tab_r2:
+                    fig_prob = go.Figure(go.Scatter(x=t, y=prob_failure, mode='lines', line=dict(color='red')))
+                    fig_prob.update_layout(title=f"Probabilidade de Falha F(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="F(t)")
+                    st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
+
+                with tab_r3:
+                    fig_haz = go.Figure(go.Scatter(x=t, y=hazard_rate, mode='lines', line=dict(color='orange')))
+                    fig_haz.update_layout(title=f"Taxa de Falha h(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
+                    st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
+
+                with tab_r4:
+                    tbf_data['Tempo Acumulado'] = tbf_data['TOTAL HORAS DECIMAIS'].cumsum()
+                    tbf_data['Falhas Acumuladas'] = range(1, len(tbf_data) + 1)
+                    tbf_data['MTBF Acumulado'] = tbf_data['Tempo Acumulado'] / tbf_data['Falhas Acumuladas']
+                    fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title=f"RGA - Crescimento da Confiabilidade ({dim_conf})", markers=True)
+                    st.plotly_chart(setup_hover(fig_rga), use_container_width=True)
+            else:
+                st.warning("Dados de TBF insuficientes (mínimo de 4 ocorrências exigidas).")
     else:
-        st.info("Faça o upload da Planilha de OS.")
+        st.info("Faça o upload da Planilha de OS para iniciar o Dashboard.")
 
 # =====================================================================
 # ABA 2: IA & CONFIABILIDADE AVANÇADA
@@ -293,7 +354,7 @@ with aba_ia:
             fig_haz_g.update_layout(title="Curva da Banheira: Taxa de Falha h(t)", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
             st.plotly_chart(fig_haz_g, use_container_width=True)
         else:
-            st.warning("Dados insuficientes.")
+            st.warning("Dados de TBF insuficientes.")
     else:
         st.info("Carregue a planilha na aba principal.")
 
@@ -317,10 +378,10 @@ with aba_estrategia:
         gr_sp = col_s3.selectbox("Filtre o Grupo:", ["Todos"] + df_sp['GRUPO'].dropna().unique().tolist())
         if gr_sp != "Todos": df_sp = df_sp[df_sp['GRUPO'] == gr_sp]
         
-        sub_sp = col_s4.selectbox("Selecione o Subgrupo:", ["Todos"] + df_sp['SUBGRUPO'].dropna().unique().tolist())
+        sub_sp = col_s4.selectbox("Selecione o Subgrupo Alvo:", ["Todos"] + df_sp['SUBGRUPO'].dropna().unique().tolist())
         if sub_sp != "Todos": df_sp = df_sp[df_sp['SUBGRUPO'] == sub_sp]
         
-        horas_projecao = st.number_input("Horas de Projeção (ex: 4380h para 6 meses)", value=4380, min_value=1)
+        horas_projecao = st.number_input("Insira as Horas de Projeção (ex: 4380h para 6 meses)", value=4380, min_value=1)
         
         falhas_spare = len(df_sp)
         if falhas_spare > 0 and (mod_sp != "Todos" or eq_sp != "Todos" or gr_sp != "Todos" or sub_sp != "Todos"):
@@ -334,7 +395,7 @@ with aba_estrategia:
             
             lambda_expected = (horas_projecao / mtbf_spare) * qtd_ativos_spare
             estoque_recomendado = poisson.ppf(0.95, lambda_expected)
-            st.success(f"🛒 **Estoque Recomendado (95% Segurança): {int(estoque_recomendado)} unidades** (Demanda Média: {lambda_expected:.1f} falhas)")
+            st.success(f"🛒 **Estoque Recomendado (95% de Segurança): {int(estoque_recomendado)} unidades** (Demanda Média: {lambda_expected:.1f} falhas)")
         else:
             st.warning("Selecione os filtros acima até chegar no item alvo.")
 
@@ -374,7 +435,7 @@ with aba_estrategia:
                 fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF")
                 fig_cdf.add_hline(y=2, line_dash="dot", line_color="red", opacity=0.5)
                 fig_cdf.add_hline(y=10, line_dash="dot", line_color="orange", opacity=0.5)
-                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)")
+                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+5)]))
                 st.plotly_chart(fig_cdf, use_container_width=True)
         else:
             st.warning("Dados insuficientes para calcular os parâmetros B2 e B10.")
@@ -384,10 +445,10 @@ with aba_estrategia:
         
         if len(tbf_clean_insp) > 3:
             if shape_i <= 1:
-                st.error(f"$\\beta$ ({shape_i:.3f}) $\le$ 1. A manutenção baseada no tempo não é econômica.")
+                st.error(f"$\\beta$ ({shape_i:.3f}) $\le$ 1. A manutenção baseada no tempo não é econômica para este modo de falha.")
             else:
                 col_c1, col_c2 = st.columns(2)
-                C_pm = col_c1.number_input("Custo de Manutenção Preventiva / Planejada (Cpm)", value=1500)
+                C_pm = col_c1.number_input("Custo de Manutenção Preventiva (Cpm)", value=1500)
                 C_cm = col_c2.number_input("Custo de Manutenção Corretiva (Cmc)", value=8000)
                 
                 if C_cm > C_pm:
@@ -420,10 +481,9 @@ with aba_plano_acao:
     
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # Nomes exatos para evitar duplicação no Pandas/Google Sheets
     colunas_5w2h = [
         "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
-        "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", 
+        "Where? (Onde/Equipamento)", "Prazo Original", "Who? (Responsável)", 
         "How? (Como)", "How Much? (Custo Estimado)", "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
     ]
     
@@ -440,21 +500,17 @@ with aba_plano_acao:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    # Limpeza forte para evitar erros Float64 e "None"
-    df_acao = df_acao.fillna("")
-    for col in colunas_5w2h:
-        df_acao[col] = df_acao[col].astype(str).replace({'nan': '', 'None': '', 'NaT': ''})
-
-    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], format='%d/%m/%Y', errors='coerce')
-    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], format='%d/%m/%Y', errors='coerce')
+    # Convertendo as datas recebidas para o formato adequado do Streamlit Editor
+    df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], format='%d/%m/%Y', errors='coerce').dt.date
+    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], format='%d/%m/%Y', errors='coerce').dt.date
 
     st.markdown("#### Filtros do Plano de Ação")
     col_f1, col_f2 = st.columns(2)
     contratos_disp = df_acao["NOME DO CONTRATO"].dropna().astype(str).unique().tolist()
     status_disp = df_acao["Status"].dropna().astype(str).unique().tolist()
     
-    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != "" and c != "nan"])
-    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != "" and s != "nan"])
+    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != "nan" and c != ""])
+    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != "nan" and s != ""])
     
     df_display = df_acao.copy()
     if filtro_contrato:
@@ -469,7 +525,7 @@ with aba_plano_acao:
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
-            "When? (Prazo)": st.column_config.DateColumn("When? (Prazo)", format="DD/MM/YYYY"),
+            "Prazo Original": st.column_config.DateColumn("Prazo Original", format="DD/MM/YYYY"),
             "Nova Data": st.column_config.DateColumn("Nova Data", format="DD/MM/YYYY"),
             "Status": st.column_config.SelectboxColumn("Status", options=["Concluído", "Em Andamento", "Reprogramado", "Atrasado"], required=False),
             "Dias de Atraso": st.column_config.TextColumn("Dias de Atraso", disabled=True),
@@ -489,12 +545,10 @@ with aba_plano_acao:
             with st.spinner("Processando Auditoria e Enviando..."):
                 try:
                     hoje = datetime.now().strftime('%d/%m/%Y')
-                    df_editado = df_editado.fillna("")
                     
                     for idx, row in df_editado.iterrows():
-                        # Calcula dias de atraso
                         try:
-                            prazo = pd.to_datetime(row['When? (Prazo)'])
+                            prazo = pd.to_datetime(row['Prazo Original'])
                             nova = pd.to_datetime(row['Nova Data'])
                             if pd.notnull(prazo) and pd.notnull(nova):
                                 atraso = (nova - prazo).days
@@ -502,25 +556,29 @@ with aba_plano_acao:
                         except Exception:
                             pass
                         
-                        # Histórico de Status
                         if idx in df_acao.index:
                             old_status = str(df_acao.loc[idx, 'Status'])
                             new_status = str(row['Status'])
                             if new_status != old_status and new_status in ['Reprogramado', 'Atrasado']:
                                 hist = str(row.get('Histórico', ''))
-                                if hist == "nan": hist = ""
-                                nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y') if pd.notnull(row['Nova Data']) else ''
+                                if hist == "nan" or hist == "None": hist = ""
+                                try:
+                                    nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y')
+                                except:
+                                    nova_dt_str = ""
                                 novo_reg = f"[{hoje}] Mudou para {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
                                 df_editado.at[idx, 'Histórico'] = (hist + " | " + novo_reg).strip(" | ")
 
-                    df_editado['When? (Prazo)'] = pd.to_datetime(df_editado['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
-
-                    df_editado = df_editado.astype(str).replace({'nan': '', 'None': '', 'NaT': ''})
+                    df_editado['Prazo Original'] = pd.to_datetime(df_editado['Prazo Original'], errors='coerce').dt.strftime('%d/%m/%Y')
+                    df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data'], errors='coerce').dt.strftime('%d/%m/%Y')
+                    
                     df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
                     df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
+                    
+                    # == LIMPEZA DO NaN PARA O JSON ==
+                    df_final = df_final.fillna("")
+                    df_final = df_final.astype(str)
+                    df_final = df_final.replace({'nan': '', 'None': '', 'NaT': '', '<NA>': ''})
                     
                     import requests
                     dados_json = df_final.to_dict(orient="records")
@@ -553,11 +611,9 @@ with aba_plano_acao:
             pdf.cell(0, 10, "Plano de Acao 5W2H", ln=True, align='C')
             
             pdf.set_font("Arial", 'B', 7)
-            # Cabeçalhos encurtados para o PDF
             pdf_headers = ["Contrato", "O que", "Por que", "Onde", "Prazo", "Resp.", "Como", "Custo", "Status", "Motivo", "Nova Data", "Atraso", "Historico"]
-            col_widths = [18, 25, 20, 15, 18, 15, 25, 15, 18, 25, 18, 10, 55] 
+            col_widths = [15, 25, 20, 15, 16, 15, 25, 15, 18, 25, 16, 12, 60] 
             
-            # Print Headers
             max_lines = 1
             for i, col in enumerate(pdf_headers):
                 lines = get_pdf_lines(pdf, remove_accents(col), col_widths[i])
@@ -565,17 +621,16 @@ with aba_plano_acao:
             row_height = max_lines * 4
             x, y = pdf.get_x(), pdf.get_y()
             for i, col in enumerate(pdf_headers):
+                pdf.rect(x, y, col_widths[i], row_height)
                 pdf.set_xy(x, y)
                 pdf.multi_cell(col_widths[i], 4, remove_accents(col), border=0, align='L')
-                pdf.rect(x, y, col_widths[i], row_height)
                 x += col_widths[i]
             pdf.set_y(y + row_height)
             
-            # Print Rows
             pdf.set_font("Arial", '', 6)
             for idx, row in df_editado.iterrows():
                 row_data = [str(row.get(c, "")) for c in colunas_5w2h]
-                row_data = [remove_accents(item) if item not in ["nan", "NaT", "None"] else "" for item in row_data]
+                row_data = [remove_accents(item) if item not in ["nan", "NaT", "None", "<NA>"] else "" for item in row_data]
                 
                 max_lines = 1
                 for i, text in enumerate(row_data):
@@ -589,9 +644,9 @@ with aba_plano_acao:
                     x, y = pdf.get_x(), pdf.get_y()
                     
                 for i, text in enumerate(row_data):
+                    pdf.rect(x, y, col_widths[i], row_height)
                     pdf.set_xy(x, y)
                     pdf.multi_cell(col_widths[i], 4, text, border=0, align='L')
-                    pdf.rect(x, y, col_widths[i], row_height)
                     x += col_widths[i]
                 pdf.set_y(y + row_height)
             
@@ -610,6 +665,7 @@ with aba_lda:
         st.error("⚠️ Biblioteca `lifelines` ausente no requirements.txt.")
     else:
         file_lda = st.file_uploader("Carregue a planilha de Controle de Componentes", type=["xlsx"], key="lda_uploader")
+        
         if file_lda is not None:
             df_comp_raw = pd.read_excel(file_lda, sheet_name=0)
             df_comp_raw.columns = df_comp_raw.columns.str.replace('\n', ' ').str.replace('  ', ' ').str.strip()
@@ -642,7 +698,6 @@ with aba_lda:
                     st.markdown("### 📋 Tabela Resumo")
                     cols_exist = [c for c in ['MODELO', 'TAG', 'COMPONENTE', 'SITUAÇÃO DO COMPONENTE', 'Horas_LDA'] if c in df_alvo.columns]
                     st.dataframe(df_alvo[cols_exist].sort_values('Horas_LDA', ascending=False), use_container_width=True)
-                    st.write(f"**Amostras:** {len(df_alvo)} | **Falhas:** {falhas_count} | **Censuras:** {susp_count}")
                     
                     if falhas_count > 0:
                         wf = WeibullFitter()
@@ -661,7 +716,7 @@ with aba_lda:
                             st.plotly_chart(fig_l1, use_container_width=True)
                         with tab_l2:
                             st.plotly_chart(go.Figure(go.Scatter(x=t_lda, y=wf.hazard_at_times(t_lda), mode='lines', line=dict(color='purple'))), use_container_width=True)
-                
+
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante")
                 component_mttf = calcular_mttf_componentes(df_comp)
@@ -689,6 +744,7 @@ with aba_lda:
                         
                         df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
                         df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
+                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
                         st.dataframe(df_mttf_display, use_container_width=True)
             else:
                 st.error("Colunas obrigatórias ausentes.")
