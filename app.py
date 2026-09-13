@@ -8,6 +8,8 @@ from scipy.stats import poisson
 from scipy.special import gamma
 import io
 import os
+import math
+from datetime import datetime
 import tempfile
 import warnings
 import unicodedata
@@ -64,6 +66,12 @@ def remove_accents(input_str):
     nfkd_form = unicodedata.normalize('NFKD', str(input_str))
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
+def get_pdf_lines(pdf, text, width):
+    """Calcula matematicamente quantas linhas um texto vai ocupar para quebrar a célula no PDF"""
+    text = str(text).replace("\n", " ")
+    if not text or text == "nan": return 1
+    return max(1, math.ceil(pdf.get_string_width(text) / (width - 2)))
+
 # --- NAVEGAÇÃO POR ABAS PRINCIPAIS ---
 aba_dashboard, aba_ia, aba_estrategia, aba_plano_acao, aba_lda = st.tabs([
     "📊 Dashboard de OS", 
@@ -82,7 +90,6 @@ with aba_dashboard:
 
     if uploaded_file is not None:
         df = carregar_dados_os(uploaded_file)
-
         st.sidebar.header("Filtros em Cascata")
         
         min_date = df['DATA INÍCIO'].min()
@@ -90,7 +97,6 @@ with aba_dashboard:
         date_range = st.sidebar.date_input("Período (Afeta apenas KPIs e Pareto)", [min_date, max_date])
         
         df_cascaded = df.copy()
-        
         def apply_cascading_filter(df_in, col_name, label):
             if col_name in df_in.columns:
                 options = df_in[col_name].dropna().astype(str).unique().tolist()
@@ -323,11 +329,9 @@ with aba_estrategia:
             
             lambda_expected = (horas_projecao / mtbf_spare) * qtd_ativos_spare
             estoque_recomendado = poisson.ppf(0.95, lambda_expected)
-            
-            st.info(f"Para a seleção atual, com MTBF de {mtbf_spare:.0f}h e {qtd_ativos_spare} equipamentos na frota, a demanda esperada é de {lambda_expected:.1f} falhas em {horas_projecao}h.")
-            st.success(f"🛒 **Estoque Recomendado (95% de Segurança): {int(estoque_recomendado)} unidades**")
+            st.success(f"🛒 **Estoque Recomendado (95% Segurança): {int(estoque_recomendado)} unidades** (Demanda Média: {lambda_expected:.1f} falhas)")
         else:
-            st.warning("Selecione os filtros acima até chegar no item alvo para calcular o estoque.")
+            st.warning("Selecione os filtros acima até chegar no item alvo.")
 
         st.markdown("---")
         st.markdown("### 🔍 2. Cálculo de Intervalo de Inspeções (F(t) e MTBF)")
@@ -365,7 +369,7 @@ with aba_estrategia:
                 fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF")
                 fig_cdf.add_hline(y=2, line_dash="dot", line_color="red", opacity=0.5)
                 fig_cdf.add_hline(y=10, line_dash="dot", line_color="orange", opacity=0.5)
-                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+5)]))
+                fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)")
                 st.plotly_chart(fig_cdf, use_container_width=True)
         else:
             st.warning("Dados insuficientes para calcular os parâmetros B2 e B10.")
@@ -375,7 +379,7 @@ with aba_estrategia:
         
         if len(tbf_clean_insp) > 3:
             if shape_i <= 1:
-                st.error(f"O parâmetro $\\beta$ ({shape_i:.3f}) é $\le$ 1. A manutenção preventiva baseada no tempo não é econômica para este modo de falha.")
+                st.error(f"$\\beta$ ({shape_i:.3f}) $\le$ 1. A manutenção baseada no tempo não é econômica para este modo de falha.")
             else:
                 col_c1, col_c2 = st.columns(2)
                 C_pm = col_c1.number_input("Custo de Manutenção Preventiva / Planejada (Cpm)", value=1500)
@@ -395,15 +399,13 @@ with aba_estrategia:
                     fig_ort.add_vline(x=optimal_time, line_dash="dash", line_color="red", annotation_text=f"Tempo Ótimo: {optimal_time:.0f}h")
                     fig_ort.update_layout(title="Optimal Replacement Time Estimation (CPUT)", xaxis_title="Replacement time (h)", yaxis_title="Cost per unit time")
                     st.plotly_chart(fig_ort, use_container_width=True)
-                else:
-                    st.warning("O custo Corretivo deve ser maior que o Preventivo.")
         else:
             st.warning("Selecione um alvo no filtro de Inspeções com histórico suficiente.")
     else:
         st.info("Carregue a planilha na aba principal.")
 
 # =====================================================================
-# ABA 4: PLANO DE AÇÃO 5W2H (Integração via Webhook / Apps Script)
+# ABA 4: PLANO DE AÇÃO 5W2H (Integração e Exportação Avançada)
 # =====================================================================
 with aba_plano_acao:
     st.header("📋 Plano de Ação 5W2H")
@@ -413,20 +415,18 @@ with aba_plano_acao:
     
     conn = st.connection("gsheets", type=GSheetsConnection)
     
-    # NOVAS COLUNAS PARA SUPORTAR A REGRA DE REPROGRAMAÇÃO
     colunas_5w2h = [
-        "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
-        "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", 
-        "How? (Como)", "How Much? (Custo Estimado)", "Status", "Motivo", "Nova Data"
+        "NOME DO CONTRATO", "What? (O que)", "Why? (Por que)", 
+        "Where? (Onde)", "Prazo Original", "Who? (Responsável)", 
+        "How? (Como)", "Custo", "Status", "Motivo", "Nova Data", "Dias de Atraso", "Histórico"
     ]
     
     try:
         df_acao = conn.read(spreadsheet=url_planilha)
-        if df_acao.empty or len(df_acao.columns) < 2:
+        if df_acao.empty or len(df_acao.columns) < 5:
             df_acao = pd.DataFrame(columns=colunas_5w2h)
             df_acao.loc[0] = [""] * len(colunas_5w2h)
         else:
-            # Garante que as novas colunas existam caso a planilha seja antiga
             for col in colunas_5w2h:
                 if col not in df_acao.columns:
                     df_acao[col] = ""
@@ -434,18 +434,17 @@ with aba_plano_acao:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
 
-    # Converte colunas de data para o formato datetime para o editor funcionar
-    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], errors='coerce')
-    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], errors='coerce')
+    # Formatar datas para o st.data_editor
+    df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original'], format='%d/%m/%Y', errors='coerce')
+    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], format='%d/%m/%Y', errors='coerce')
 
-    # --- FILTROS DO 5W2H ---
     st.markdown("#### Filtros do Plano de Ação")
     col_f1, col_f2 = st.columns(2)
     contratos_disp = df_acao["NOME DO CONTRATO"].dropna().astype(str).unique().tolist()
     status_disp = df_acao["Status"].dropna().astype(str).unique().tolist()
     
-    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != ""])
-    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != ""])
+    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != "nan" and c != ""])
+    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != "nan" and s != ""])
     
     df_display = df_acao.copy()
     if filtro_contrato:
@@ -453,59 +452,77 @@ with aba_plano_acao:
     if filtro_status:
         df_display = df_display[df_display["Status"].astype(str).isin(filtro_status)]
 
-    st.markdown("Edite a tabela abaixo e clique em **Salvar no Google Sheets (via Apps Script)**.")
+    st.markdown("Edite a tabela abaixo e clique em **Salvar no Google Sheets**.")
     
-    # Editor com configurações de Datas e Status Específicos
     df_editado = st.data_editor(
         df_display, 
         num_rows="dynamic", 
         use_container_width=True,
         column_config={
-            "When? (Prazo)": st.column_config.DateColumn("When? (Prazo)", format="DD/MM/YYYY"),
+            "Prazo Original": st.column_config.DateColumn("Prazo Original", format="DD/MM/YYYY"),
             "Nova Data": st.column_config.DateColumn("Nova Data", format="DD/MM/YYYY"),
-            "Status": st.column_config.SelectboxColumn(
-                "Status", 
-                options=["Concluído", "Em Andamento", "Reprogramado", "Atrasado"], 
-                required=False
-            )
+            "Status": st.column_config.SelectboxColumn("Status", options=["Concluído", "Em Andamento", "Reprogramado", "Atrasado"], required=False),
+            "Dias de Atraso": st.column_config.NumberColumn("Dias de Atraso", disabled=True),
+            "Histórico": st.column_config.TextColumn("Histórico", disabled=True)
         }
     )
     
     if st.button("💾 Salvar no Google Sheets (via Apps Script)"):
-        # VALIDAÇÃO: Se estiver Reprogramado ou Atrasado, exige Motivo e Nova Data
+        # Validação: Exige motivo e nova data se reprogramado ou atrasado
         linhas_invalidas = df_editado[
             (df_editado['Status'].isin(['Reprogramado', 'Atrasado'])) & 
             ((df_editado['Motivo'].isna()) | (df_editado['Motivo'] == "") | (df_editado['Nova Data'].isna()))
         ]
         
         if not linhas_invalidas.empty:
-            st.error("⚠️ **Atenção:** Todas as ações marcadas como 'Reprogramado' ou 'Atrasado' exigem obrigatoriamente o preenchimento das colunas 'Motivo' e 'Nova Data'.")
+            st.error("⚠️ **Atenção:** Ações 'Reprogramadas' ou 'Atrasadas' exigem o preenchimento de 'Motivo' e 'Nova Data'.")
         else:
-            with st.spinner("Enviando dados para a nuvem..."):
+            with st.spinner("Processando e Enviando..."):
                 try:
-                    # Converte datas de volta para string antes de exportar
-                    df_editado['When? (Prazo)'] = pd.to_datetime(df_editado['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    hoje = datetime.now().strftime('%d/%m/%Y')
+                    for idx, row in df_editado.iterrows():
+                        # Cálculo Automático de Dias de Atraso
+                        try:
+                            prazo = pd.to_datetime(row['Prazo Original'])
+                            nova = pd.to_datetime(row['Nova Data'])
+                            if pd.notnull(prazo) and pd.notnull(nova):
+                                atraso = (nova - prazo).days
+                                df_editado.at[idx, 'Dias de Atraso'] = atraso if atraso > 0 else 0
+                        except Exception:
+                            pass
+                        
+                        # Histórico Automático (Auditoria)
+                        if idx in df_acao.index:
+                            old_status = str(df_acao.loc[idx, 'Status'])
+                            new_status = str(row['Status'])
+                            if new_status != old_status and new_status in ['Reprogramado', 'Atrasado']:
+                                hist = str(row.get('Histórico', ''))
+                                if hist == "nan": hist = ""
+                                nova_dt_str = pd.to_datetime(row['Nova Data']).strftime('%d/%m/%Y') if pd.notnull(row['Nova Data']) else ''
+                                novo_reg = f"[{hoje}] Mudou para {new_status} (Nova Data: {nova_dt_str}). Motivo: {row.get('Motivo','')}"
+                                df_editado.at[idx, 'Histórico'] = (hist + "\n" + novo_reg).strip()
+
+                    # Transforma em formato String para o Google Sheets
+                    df_editado['Prazo Original'] = pd.to_datetime(df_editado['Prazo Original']).dt.strftime('%d/%m/%Y').replace('NaT', '')
                     df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
-                    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_acao['Prazo Original'] = pd.to_datetime(df_acao['Prazo Original']).dt.strftime('%d/%m/%Y').replace('NaT', '')
                     df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
 
-                    # Merge: Preservar as linhas não filtradas e substituir pelas editadas
                     df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
                     df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
                     
-                    import requests
                     dados_json = df_final.fillna("").to_dict(orient="records")
                     resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
                     
                     if resposta.status_code == 200 and resposta.json().get("status") == "success":
-                        st.success("✅ Dados salvos com sucesso na planilha via Apps Script!")
+                        st.success("✅ Dados salvos e auditados no Google Sheets!")
                         st.cache_data.clear()
                     else:
-                        st.error(f"Erro ao salvar: {resposta.text}")
+                        st.error(f"Erro do servidor: {resposta.text}")
                 except Exception as e:
-                    st.error(f"⚠️ Erro de conexão com o Apps Script: {e}")
+                    st.error(f"⚠️ Erro ao salvar: {e}")
 
-    # --- EXPORTAÇÃO EXCEL E PDF CORRIGIDA ---
+    # --- EXPORTAÇÃO EXCEL E PDF CORRIGIDA (WRAP TEXTO) ---
     st.markdown("---")
     st.markdown("### 📥 Exportar Plano de Ação (Filtrado)")
     col_d1, col_d2 = st.columns(2)
@@ -518,35 +535,59 @@ with aba_plano_acao:
         
     with col_d2:
         if FPDF_INSTALLED:
-            pdf = FPDF(orientation='L') # Formato Paisagem
+            pdf = FPDF(orientation='L', unit='mm', format='A4') # Paisagem
             pdf.add_page()
             pdf.set_font("Arial", 'B', 12)
             pdf.cell(0, 10, "Plano de Acao 5W2H", ln=True, align='C')
             
-            # Fonte menor para evitar sobreposição (Tamanho 7)
             pdf.set_font("Arial", 'B', 7)
+            pdf_headers = ["Contrato", "O que", "Por que", "Onde", "Prazo", "Resp.", "Como", "Custo", "Status", "Motivo", "Nova Data", "Atraso", "Historico"]
+            # Larguras ajustadas para somar 277mm (largura útil da página A4 Paisagem)
+            col_widths = [15, 25, 20, 15, 16, 15, 25, 15, 18, 25, 16, 12, 60] 
             
-            # Cabeçalhos encurtados e larguras milimétricas para somar ~270mm (A4 Landscape)
-            pdf_headers = ["CONTRATO", "What? (O que)", "Why? (Por que)", "Where? (Onde)", "Prazo", "Resp.", "How? (Como)", "Custo", "Status", "Motivo", "Nova Data"]
-            col_widths = [20, 30, 30, 25, 20, 25, 30, 20, 25, 30, 20] 
-            
+            # Print Headers
+            max_lines = 1
             for i, col in enumerate(pdf_headers):
-                pdf.cell(col_widths[i], 8, remove_accents(col)[:30], border=1)
-            pdf.ln()
+                lines = get_pdf_lines(pdf, col, col_widths[i])
+                if lines > max_lines: max_lines = lines
+            row_height = max_lines * 4
+            x, y = pdf.get_x(), pdf.get_y()
+            for i, col in enumerate(pdf_headers):
+                pdf.rect(x, y, col_widths[i], row_height)
+                pdf.set_xy(x, y)
+                pdf.multi_cell(col_widths[i], 4, remove_accents(col), border=0, align='C')
+                x += col_widths[i]
+            pdf.set_y(y + row_height)
             
-            pdf.set_font("Arial", '', 7)
+            # Print Rows
+            pdf.set_font("Arial", '', 6)
             for idx, row in df_editado.iterrows():
-                for i, col in enumerate(colunas_5w2h):
-                    val = str(row.get(col, ""))
-                    if val == "NaT" or val == "nan": val = ""
-                    val = remove_accents(val)[:35] # Corta excesso de texto para não sobrepor
-                    pdf.cell(col_widths[i], 8, val, border=1)
-                pdf.ln()
+                row_data = [str(row.get(c, "")) for c in colunas_5w2h]
+                row_data = [remove_accents(item) if item != "nan" and item != "NaT" else "" for item in row_data]
+                
+                max_lines = 1
+                for i, text in enumerate(row_data):
+                    lines = get_pdf_lines(pdf, text, col_widths[i])
+                    if lines > max_lines: max_lines = lines
+                row_height = max_lines * 4
+                
+                x, y = pdf.get_x(), pdf.get_y()
+                # Verifica se precisa de quebra de página
+                if y + row_height > 190:
+                    pdf.add_page()
+                    y = pdf.get_y()
+                    
+                for i, text in enumerate(row_data):
+                    pdf.rect(x, y, col_widths[i], row_height)
+                    pdf.set_xy(x, y)
+                    pdf.multi_cell(col_widths[i], 4, text, border=0)
+                    x += col_widths[i]
+                pdf.set_y(y + row_height)
             
             pdf_bytes = pdf.output(dest="S").encode("latin-1", "replace")
-            st.download_button("📄 Baixar em PDF", data=pdf_bytes, file_name='plano_acao_5w2h.pdf', mime='application/pdf')
+            st.download_button("📄 Baixar em PDF (Formatado)", data=pdf_bytes, file_name='plano_acao_5w2h.pdf', mime='application/pdf')
         else:
-            st.warning("Biblioteca FPDF não instalada no servidor.")
+            st.warning("Biblioteca FPDF não instalada.")
 
 # =====================================================================
 # ABA 5: CONTROLE DE COMPONENTES E LDA
