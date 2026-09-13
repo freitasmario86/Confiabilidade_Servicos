@@ -236,79 +236,16 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
-        # --- CONFIABILIDADE DINÂMICA (Weibull e RGA) ---
-        st.markdown("---")
-        st.markdown("### 📈 Confiabilidade Dinâmica (Weibull) e RGA")
-        
-        dim_conf = st.radio("Nível de Análise de Confiabilidade:", ["FROTA GERAL", "EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
-        df_conf = corretivas.copy()
-        
-        if dim_conf != "FROTA GERAL":
-            opcoes_conf = df_conf[dim_conf].dropna().astype(str).unique().tolist()
-            opcoes_conf.sort()
-            alvo_conf = st.selectbox(f"Selecione o {dim_conf.title()} alvo:", opcoes_conf)
-            df_conf = df_conf[df_conf[dim_conf] == alvo_conf]
-
-        if not df_conf.empty:
-            tbf_data = df_conf.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
-            tbf_data['TBF'] = tbf_data.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
-            tbf_clean = tbf_data['TBF'].dropna()
-            tbf_clean = tbf_clean[tbf_clean > 0].values
-
-            if len(tbf_clean) > 3:
-                shape, loc, scale = st_scipy.weibull_min.fit(tbf_clean, floc=0)
-                beta = shape
-                eta = scale
-                
-                st.success(f"**Distribuição Utilizada:** Weibull | **Forma ($\\beta$):** {beta:.3f} | **Vida Característica ($\\eta$):** {eta:.2f} horas")
-
-                t = np.linspace(0.1, max(tbf_clean) * 1.2, 200)
-                reliability = st_scipy.weibull_min.sf(t, shape, loc=0, scale=scale)
-                prob_failure = st_scipy.weibull_min.cdf(t, shape, loc=0, scale=scale)
-                hazard_rate = st_scipy.weibull_min.pdf(t, shape, loc=0, scale=scale) / reliability
-                hazard_rate[np.isinf(hazard_rate)] = 0
-
-                tab_r1, tab_r2, tab_r3, tab_r4 = st.tabs(["Confiabilidade R(t)", "Probabilidade F(t)", "Taxa de Falha h(t)", "RGA"])
-
-                def setup_hover(fig):
-                    fig.update_layout(hovermode="x unified")
-                    fig.update_xaxes(showspikes=True, spikecolor="gray", spikesnap="cursor", spikemode="across")
-                    return fig
-
-                with tab_r1:
-                    fig_rel = go.Figure(go.Scatter(x=t, y=reliability, mode='lines', line=dict(color='green')))
-                    fig_rel.update_layout(title=f"Curva de Confiabilidade R(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="R(t)")
-                    st.plotly_chart(setup_hover(fig_rel), use_container_width=True)
-
-                with tab_r2:
-                    fig_prob = go.Figure(go.Scatter(x=t, y=prob_failure, mode='lines', line=dict(color='red')))
-                    fig_prob.update_layout(title=f"Probabilidade de Falha F(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="F(t)")
-                    st.plotly_chart(setup_hover(fig_prob), use_container_width=True)
-
-                with tab_r3:
-                    fig_haz = go.Figure(go.Scatter(x=t, y=hazard_rate, mode='lines', line=dict(color='orange')))
-                    fig_haz.update_layout(title=f"Taxa de Falha h(t) - {dim_conf}", xaxis_title="Tempo (Horas)", yaxis_title="Falhas / Hora")
-                    st.plotly_chart(setup_hover(fig_haz), use_container_width=True)
-
-                with tab_r4:
-                    tbf_data['Tempo Acumulado'] = tbf_data['TOTAL HORAS DECIMAIS'].cumsum()
-                    tbf_data['Falhas Acumuladas'] = range(1, len(tbf_data) + 1)
-                    tbf_data['MTBF Acumulado'] = tbf_data['Tempo Acumulado'] / tbf_data['Falhas Acumuladas']
-                    fig_rga = px.line(tbf_data, x='Tempo Acumulado', y='MTBF Acumulado', title=f"RGA - Crescimento da Confiabilidade ({dim_conf})", markers=True)
-                    st.plotly_chart(setup_hover(fig_rga), use_container_width=True)
-            else:
-                st.warning("Dados de TBF insuficientes (mínimo de 4 ocorrências exigidas).")
     else:
         st.info("Faça o upload da planilha Excel de OS para iniciar o Dashboard.")
 
 # =====================================================================
-# ABA 2: IA & CONFIABILIDADE AVANÇADA (Matriz, Banheira)
+# ABA 2: IA & CONFIABILIDADE AVANÇADA
 # =====================================================================
 with aba_ia:
     st.header("🧠 Inteligência Artificial & Confiabilidade Avançada")
     if 'corretivas' in locals() and not corretivas.empty:
         
-        # --- MATRIZ DE CRITICIDADE (FMECA) COM RÓTULOS ---
         st.markdown("### 🎯 Matriz de Criticidade (FMECA)")
         fmeca_dim = st.selectbox("Analisar Criticidade por:", ["EQUIPAMENTO", "GRUPO", "SUBGRUPO"], key='fmeca')
         df_fmeca = corretivas.groupby(fmeca_dim).agg(Falhas=('OS', 'count'), Severidade=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
@@ -323,7 +260,6 @@ with aba_ia:
         fig_fmeca.update_traces(textposition='top center', textfont=dict(size=10, color='black'), cliponaxis=False)
         st.plotly_chart(fig_fmeca, use_container_width=True)
 
-        # --- CURVA DA BANHEIRA ---
         st.markdown("---")
         st.markdown("### 🛁 Curva da Banheira (Diagnóstico de Frota)")
         tbf_data_global = corretivas.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
@@ -351,16 +287,13 @@ with aba_ia:
         st.info("Carregue a planilha na aba principal.")
 
 # =====================================================================
-# ABA 3: 5 ETAPAS E ESTRATÉGIA (Inspeções e Reparo)
+# ABA 3: 5 ETAPAS E ESTRATÉGIA
 # =====================================================================
 with aba_estrategia:
     st.header("⏱️ Estratégia de Reparo, Inspeções e Sobressalentes")
     
     if 'corretivas' in locals() and not corretivas.empty:
-        # --- PREVISÃO DE SOBRESSALENTES EM CASCATA ---
         st.markdown("### 📦 1. Previsão de Sobressalentes (Spare Parts Forecasting)")
-        st.markdown("Utiliza a teoria de Poisson baseada no MTBF para prever a demanda estatística de peças (garantindo 95% de nível de serviço).")
-        
         df_sp = corretivas.copy()
         
         col_s1, col_s2, col_s3, col_s4 = st.columns(4)
@@ -394,13 +327,10 @@ with aba_estrategia:
             st.info(f"Para a seleção atual, com MTBF de {mtbf_spare:.0f}h e {qtd_ativos_spare} equipamentos na frota, a demanda esperada é de {lambda_expected:.1f} falhas em {horas_projecao}h.")
             st.success(f"🛒 **Estoque Recomendado (95% de Segurança): {int(estoque_recomendado)} unidades**")
         else:
-            st.warning("Selecione os filtros acima até chegar no item alvo para calcular o estoque (É necessário haver falhas computadas).")
+            st.warning("Selecione os filtros acima até chegar no item alvo para calcular o estoque.")
 
-        # --- INTERVALO DE INSPEÇÕES COM GRÁFICO ---
         st.markdown("---")
         st.markdown("### 🔍 2. Cálculo de Intervalo de Inspeções (F(t) e MTBF)")
-        st.markdown("Cálculo baseado na probabilidade de falha (Weibull) para definir o timing exato das preventivas e inspeções preditivas.")
-        
         dim_insp = st.selectbox("Nível para Intervalo de Inspeção:", ["MODELO EQUIPAMENTO", "EQUIPAMENTO", "GRUPO"], key='insp')
         opcoes_insp = corretivas[dim_insp].dropna().unique().tolist()
         alvo_insp = st.selectbox("Selecione o Alvo para Inspeção:", opcoes_insp, key='insp_alvo')
@@ -413,8 +343,6 @@ with aba_estrategia:
         
         if len(tbf_clean_insp) > 3:
             shape_i, loc_i, scale_i = st_scipy.weibull_min.fit(tbf_clean_insp, floc=0)
-            
-            # Cálculo de B2 e B10
             B2 = st_scipy.weibull_min.ppf(0.02, shape_i, scale=scale_i)
             B10 = st_scipy.weibull_min.ppf(0.10, shape_i, scale=scale_i)
             mtbf_i = scale_i * gamma(1 + (1/shape_i))
@@ -422,67 +350,43 @@ with aba_estrategia:
             st.write(f"**Memorial Estatístico:** $\\beta$ = {shape_i:.3f} | $\\eta$ = {scale_i:.1f}h | **B2 = {B2:.1f}h** | **B10 = {B10:.1f}h** | **MTBF = {mtbf_i:.1f}h**")
             
             col_tabela, col_grafico = st.columns([1, 2])
-            
             with col_tabela:
                 st.markdown("<br>", unsafe_allow_html=True)
-                tabela_inspecao = pd.DataFrame({
-                    "Criticidade": ["S/Q (Segurança)", "A", "B", "C"],
-                    "Cálculo": ["B2 / 3", "B10 / 3", "MTBF / 2", "Histórico"],
-                    "Inspeção (h)": [f"{B2/3:.0f}", f"{B10/3:.0f}", f"{mtbf_i/2:.0f}", "-"]
-                })
+                tabela_inspecao = pd.DataFrame({"Criticidade": ["S/Q (Segurança)", "A", "B", "C"], "Cálculo": ["B2 / 3", "B10 / 3", "MTBF / 2", "Histórico"], "Inspeção (h)": [f"{B2/3:.0f}", f"{B10/3:.0f}", f"{mtbf_i/2:.0f}", "-"]})
                 st.table(tabela_inspecao)
             
             with col_grafico:
                 t_plot = np.linspace(0.1, max(tbf_clean_insp)*1.5, 300)
                 cdf_plot = st_scipy.weibull_min.cdf(t_plot, shape_i, scale=scale_i) * 100
-                
                 fig_cdf = go.Figure()
                 fig_cdf.add_trace(go.Scatter(x=t_plot, y=cdf_plot, mode='lines', name='Probabilidade F(t) (%)', line=dict(color='blue')))
-                
-                # Marcações
                 fig_cdf.add_vline(x=B2, line_dash="dash", line_color="red", annotation_text="B2 (2%)")
                 fig_cdf.add_vline(x=B10, line_dash="dash", line_color="orange", annotation_text="B10 (10%)")
                 fig_cdf.add_vline(x=mtbf_i, line_dash="dash", line_color="black", annotation_text="MTBF")
-                
                 fig_cdf.add_hline(y=2, line_dash="dot", line_color="red", opacity=0.5)
                 fig_cdf.add_hline(y=10, line_dash="dot", line_color="orange", opacity=0.5)
-                
                 fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+5)]))
                 st.plotly_chart(fig_cdf, use_container_width=True)
         else:
-            st.warning("Dados insuficientes para calcular os parâmetros B2 e B10 (mínimo de 4 ocorrências exigidas).")
+            st.warning("Dados insuficientes para calcular os parâmetros B2 e B10.")
 
-        # --- AS 5 ETAPAS DO TEMPO ÓTIMO DE REPARO (ORT) ---
         st.markdown("---")
         st.markdown("### 🛠️ 3. As 5 Etapas do Tempo Ótimo de Reparo (ORT)")
-        st.markdown("Aplicação da Engenharia de Confiabilidade para determinar o momento exato de substituir componentes com o menor custo.")
         
         if len(tbf_clean_insp) > 3:
-            st.markdown("**01 - TAXONOMIA**")
-            st.write("Banco de dados processado (TBF em horas):", tbf_clean_insp[:10], "... (Amostras válidas:", len(tbf_clean_insp), ")")
-            
-            st.markdown("**02 - TESTE DE ADERÊNCIA**")
-            st.write(f"Distribuição base: **Weibull 2 Parâmetros**. $\\alpha$ (escala/$\\eta$) = {scale_i:.2f}, $\\beta$ (forma) = {shape_i:.4f}")
-            
-            st.markdown("**03 - LDA (Life Data Analysis)**")
-            st.write("O comportamento probabilístico foi validado estatisticamente e está representado nas curvas de F(t) e h(t) ao longo das abas deste portal.")
-            
-            st.markdown("**04 - ELABORAÇÃO DO MEMORIAL TÉCNICO**")
             if shape_i <= 1:
-                st.error(f"O parâmetro $\\beta$ ({shape_i:.3f}) é $\le$ 1. Isso significa que as falhas são prematuras ou aleatórias. A equação CPUT exige $\\beta > 1$ (fase de desgaste) para otimização econômica. A recomendação aqui é inspeção preditiva ou atuar na causa-raiz, pois trocar baseado apenas no tempo não reduzirá quebras.")
+                st.error(f"O parâmetro $\\beta$ ({shape_i:.3f}) é $\le$ 1. A manutenção preventiva baseada no tempo não é econômica para este modo de falha.")
             else:
                 col_c1, col_c2 = st.columns(2)
                 C_pm = col_c1.number_input("Custo de Manutenção Preventiva / Planejada (Cpm)", value=1500)
                 C_cm = col_c2.number_input("Custo de Manutenção Corretiva (Cmc)", value=8000)
                 
-                st.markdown("**05 - TEMPO ÓTIMO DE REPARO (Equação CPUT)**")
                 if C_cm > C_pm:
                     t_opt = np.linspace(1, max(tbf_clean_insp)*1.5, 500)
                     dt = t_opt[1] - t_opt[0]
                     R_t = st_scipy.weibull_min.sf(t_opt, shape_i, loc=0, scale=scale_i)
                     F_t = 1 - R_t
                     integral_R = np.cumsum(R_t) * dt
-                    
                     C_t = (C_pm * R_t + C_cm * F_t) / integral_R
                     min_idx = np.argmin(C_t)
                     optimal_time = t_opt[min_idx]
@@ -492,9 +396,9 @@ with aba_estrategia:
                     fig_ort.update_layout(title="Optimal Replacement Time Estimation (CPUT)", xaxis_title="Replacement time (h)", yaxis_title="Cost per unit time")
                     st.plotly_chart(fig_ort, use_container_width=True)
                 else:
-                    st.warning("O custo Corretivo deve ser maior que o Preventivo para a otimização fazer sentido matemático.")
+                    st.warning("O custo Corretivo deve ser maior que o Preventivo.")
         else:
-            st.warning("Selecione um alvo no filtro de Inspeções com histórico suficiente (>3 falhas).")
+            st.warning("Selecione um alvo no filtro de Inspeções com histórico suficiente.")
     else:
         st.info("Carregue a planilha na aba principal.")
 
@@ -508,16 +412,31 @@ with aba_plano_acao:
     url_planilha = "https://docs.google.com/spreadsheets/d/1mrfp_qDdX5_6sJVT5-Gk3NzM3nKqznmlR6rwDsXZN2s/edit?gid=0#gid=0"
     
     conn = st.connection("gsheets", type=GSheetsConnection)
-    colunas_5w2h = ["NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", "How? (Como)", "How Much? (Custo Estimado)", "Status"]
+    
+    # NOVAS COLUNAS PARA SUPORTAR A REGRA DE REPROGRAMAÇÃO
+    colunas_5w2h = [
+        "NOME DO CONTRATO", "What? (O que será feito)", "Why? (Por que)", 
+        "Where? (Onde/Equipamento)", "When? (Prazo)", "Who? (Responsável)", 
+        "How? (Como)", "How Much? (Custo Estimado)", "Status", "Motivo", "Nova Data"
+    ]
     
     try:
         df_acao = conn.read(spreadsheet=url_planilha)
         if df_acao.empty or len(df_acao.columns) < 2:
             df_acao = pd.DataFrame(columns=colunas_5w2h)
             df_acao.loc[0] = [""] * len(colunas_5w2h)
+        else:
+            # Garante que as novas colunas existam caso a planilha seja antiga
+            for col in colunas_5w2h:
+                if col not in df_acao.columns:
+                    df_acao[col] = ""
     except Exception:
         df_acao = pd.DataFrame(columns=colunas_5w2h)
         df_acao.loc[0] = [""] * len(colunas_5w2h)
+
+    # Converte colunas de data para o formato datetime para o editor funcionar
+    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)'], errors='coerce')
+    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data'], errors='coerce')
 
     # --- FILTROS DO 5W2H ---
     st.markdown("#### Filtros do Plano de Ação")
@@ -525,8 +444,8 @@ with aba_plano_acao:
     contratos_disp = df_acao["NOME DO CONTRATO"].dropna().astype(str).unique().tolist()
     status_disp = df_acao["Status"].dropna().astype(str).unique().tolist()
     
-    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", contratos_disp)
-    filtro_status = col_f2.multiselect("Filtrar por Status:", status_disp)
+    filtro_contrato = col_f1.multiselect("Filtrar por Contrato:", [c for c in contratos_disp if c != ""])
+    filtro_status = col_f2.multiselect("Filtrar por Status:", [s for s in status_disp if s != ""])
     
     df_display = df_acao.copy()
     if filtro_contrato:
@@ -535,29 +454,58 @@ with aba_plano_acao:
         df_display = df_display[df_display["Status"].astype(str).isin(filtro_status)]
 
     st.markdown("Edite a tabela abaixo e clique em **Salvar no Google Sheets (via Apps Script)**.")
-    df_editado = st.data_editor(df_display, num_rows="dynamic", use_container_width=True)
+    
+    # Editor com configurações de Datas e Status Específicos
+    df_editado = st.data_editor(
+        df_display, 
+        num_rows="dynamic", 
+        use_container_width=True,
+        column_config={
+            "When? (Prazo)": st.column_config.DateColumn("When? (Prazo)", format="DD/MM/YYYY"),
+            "Nova Data": st.column_config.DateColumn("Nova Data", format="DD/MM/YYYY"),
+            "Status": st.column_config.SelectboxColumn(
+                "Status", 
+                options=["Concluído", "Em Andamento", "Reprogramado", "Atrasado"], 
+                required=False
+            )
+        }
+    )
     
     if st.button("💾 Salvar no Google Sheets (via Apps Script)"):
-        with st.spinner("Enviando dados para a nuvem..."):
-            try:
-                # Merge: Preservar as linhas não filtradas e substituir pelas editadas
-                df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
-                df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
-                
-                # Conversão para JSON e envio HTTP POST
-                import requests
-                dados_json = df_final.fillna("").to_dict(orient="records")
-                resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
-                
-                if resposta.status_code == 200:
-                    st.success("✅ Dados salvos com sucesso na planilha via Apps Script!")
-                    st.cache_data.clear()
-                else:
-                    st.error(f"Erro ao salvar: {resposta.text}")
-            except Exception as e:
-                st.error(f"⚠️ Erro de conexão com o Apps Script: {e}")
+        # VALIDAÇÃO: Se estiver Reprogramado ou Atrasado, exige Motivo e Nova Data
+        linhas_invalidas = df_editado[
+            (df_editado['Status'].isin(['Reprogramado', 'Atrasado'])) & 
+            ((df_editado['Motivo'].isna()) | (df_editado['Motivo'] == "") | (df_editado['Nova Data'].isna()))
+        ]
+        
+        if not linhas_invalidas.empty:
+            st.error("⚠️ **Atenção:** Todas as ações marcadas como 'Reprogramado' ou 'Atrasado' exigem obrigatoriamente o preenchimento das colunas 'Motivo' e 'Nova Data'.")
+        else:
+            with st.spinner("Enviando dados para a nuvem..."):
+                try:
+                    # Converte datas de volta para string antes de exportar
+                    df_editado['When? (Prazo)'] = pd.to_datetime(df_editado['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_editado['Nova Data'] = pd.to_datetime(df_editado['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_acao['When? (Prazo)'] = pd.to_datetime(df_acao['When? (Prazo)']).dt.strftime('%d/%m/%Y').replace('NaT', '')
+                    df_acao['Nova Data'] = pd.to_datetime(df_acao['Nova Data']).dt.strftime('%d/%m/%Y').replace('NaT', '')
 
-    # --- EXPORTAÇÃO EXCEL E PDF ---
+                    # Merge: Preservar as linhas não filtradas e substituir pelas editadas
+                    df_unfiltered = df_acao[~df_acao.index.isin(df_editado.index)]
+                    df_final = pd.concat([df_unfiltered, df_editado]).sort_index()
+                    
+                    import requests
+                    dados_json = df_final.fillna("").to_dict(orient="records")
+                    resposta = requests.post(URL_APPS_SCRIPT, json=dados_json)
+                    
+                    if resposta.status_code == 200 and resposta.json().get("status") == "success":
+                        st.success("✅ Dados salvos com sucesso na planilha via Apps Script!")
+                        st.cache_data.clear()
+                    else:
+                        st.error(f"Erro ao salvar: {resposta.text}")
+                except Exception as e:
+                    st.error(f"⚠️ Erro de conexão com o Apps Script: {e}")
+
+    # --- EXPORTAÇÃO EXCEL E PDF CORRIGIDA ---
     st.markdown("---")
     st.markdown("### 📥 Exportar Plano de Ação (Filtrado)")
     col_d1, col_d2 = st.columns(2)
@@ -570,26 +518,28 @@ with aba_plano_acao:
         
     with col_d2:
         if FPDF_INSTALLED:
-            def remove_accents_pdf(input_str):
-                nfkd_form = unicodedata.normalize('NFKD', str(input_str))
-                return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
-                
-            pdf = FPDF(orientation='L') # Paisagem para caber a tabela larga
+            pdf = FPDF(orientation='L') # Formato Paisagem
             pdf.add_page()
             pdf.set_font("Arial", 'B', 12)
             pdf.cell(0, 10, "Plano de Acao 5W2H", ln=True, align='C')
-            pdf.set_font("Arial", 'B', 8)
             
-            col_widths = [30, 40, 40, 30, 20, 30, 40, 20, 20] # Total = 270mm (Margem Padrão de A4 Paisagem)
-            for i, col in enumerate(colunas_5w2h):
-                pdf.cell(col_widths[i], 8, remove_accents_pdf(col)[:20], border=1)
+            # Fonte menor para evitar sobreposição (Tamanho 7)
+            pdf.set_font("Arial", 'B', 7)
+            
+            # Cabeçalhos encurtados e larguras milimétricas para somar ~270mm (A4 Landscape)
+            pdf_headers = ["CONTRATO", "What? (O que)", "Why? (Por que)", "Where? (Onde)", "Prazo", "Resp.", "How? (Como)", "Custo", "Status", "Motivo", "Nova Data"]
+            col_widths = [20, 30, 30, 25, 20, 25, 30, 20, 25, 30, 20] 
+            
+            for i, col in enumerate(pdf_headers):
+                pdf.cell(col_widths[i], 8, remove_accents(col)[:30], border=1)
             pdf.ln()
             
-            pdf.set_font("Arial", '', 8)
+            pdf.set_font("Arial", '', 7)
             for idx, row in df_editado.iterrows():
                 for i, col in enumerate(colunas_5w2h):
                     val = str(row.get(col, ""))
-                    val = remove_accents_pdf(val)[:30]
+                    if val == "NaT" or val == "nan": val = ""
+                    val = remove_accents(val)[:35] # Corta excesso de texto para não sobrepor
                     pdf.cell(col_widths[i], 8, val, border=1)
                 pdf.ln()
             
