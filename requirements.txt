@@ -8,3 +8,5 @@ openpyxl
 st-gsheets-connection
 lifelines
 scikit-learn
+fpdf
+requests
