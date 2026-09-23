@@ -44,10 +44,10 @@ def carregar_dados_os(file):
     return df
 
 @st.cache_data
-def calcular_mttf_componentes(df_comp):
-    component_mttf = {}
+def calcular_metricas_componentes(df_comp):
+    component_metrics = {}
     if not LIFELINES_INSTALLED:
-        return component_mttf
+        return component_metrics
     for comp in df_comp['COMPONENTE'].dropna().unique():
         df_c = df_comp[(df_comp['COMPONENTE'] == comp) & (df_comp['Horas_LDA'] > 0)]
         if df_c['Status_LDA'].sum() > 0:
@@ -55,10 +55,15 @@ def calcular_mttf_componentes(df_comp):
                 wf_heat = WeibullFitter()
                 wf_heat.fit(df_c['Horas_LDA'], event_observed=df_c['Status_LDA'])
                 mttf = wf_heat.lambda_ * gamma(1 + (1/wf_heat.rho_))
-                component_mttf[comp] = mttf
+                # Cálculo da probabilidade de falha F(t) no ponto do MTTF
+                prob_mttf = (1 - np.exp(- (mttf / wf_heat.lambda_) ** wf_heat.rho_)) * 100
+                component_metrics[comp] = {
+                    'MTTF': mttf, 
+                    'Prob_MTTF': prob_mttf
+                }
             except Exception:
                 pass
-    return component_mttf
+    return component_metrics
 
 def remove_accents(input_str):
     nfkd_form = unicodedata.normalize('NFKD', str(input_str))
@@ -304,7 +309,7 @@ with aba_ia:
             
             st.success(f"🏆 **Melhor Distribuição Ajustada:** {melhor_dist['nome']} (AIC: {melhor_dist['aic']:.1f})")
             
-            # Diagnóstico da Curva da Banheira (sempre baseado no beta do Weibull como regra de ouro da engenharia)
+            # Diagnóstico da Curva da Banheira (baseado no beta do Weibull)
             estagio = "Mortalidade Infantil (Falhas Prematuras)" if shape_w < 1 else "Falhas Aleatórias (Vida Útil Normal)" if 1 <= shape_w <= 1.5 else "Fase de Desgaste (Fim de Vida)"
             st.info(f"💡 **Diagnóstico da Frota (Baseado em Weibull $\\beta={shape_w:.3f}$):** {estagio}")
 
@@ -313,7 +318,7 @@ with aba_ia:
                 st.markdown("#### Probabilidade e Confiabilidade")
                 t_input = st.number_input("Insira o Tempo Operacional $t$ (Horas) para cálculo:", min_value=1.0, value=float(round(np.mean(tbf_clean_global))), step=10.0)
                 
-                # Cálculos R(t) e F(t) dinâmicos de acordo com a melhor distribuição
+                # Cálculos R(t) e F(t) dinâmicos
                 if melhor_dist['nome'] == 'Weibull':
                     rt_val = st_scipy.weibull_min.sf(t_input, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale']) * 100
                     ft_val = 100 - rt_val
@@ -331,7 +336,7 @@ with aba_ia:
                 st.metric("Probabilidade de Falha F(t)", f"{ft_val:.1f}%")
 
             with col_dist2:
-                # Plotando a Taxa de Falha da Melhor Distribuição
+                # Geração de dados de plotagem para toda a curva de tempo
                 t_g = np.linspace(0.1, max(tbf_clean_global) * 1.2, 200)
                 if melhor_dist['nome'] == 'Weibull':
                     reliab = st_scipy.weibull_min.sf(t_g, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale'])
@@ -345,24 +350,35 @@ with aba_ia:
 
                 hazard_rate_g = pdf_vals / reliab
                 hazard_rate_g[np.isinf(hazard_rate_g)] = 0
+                
+                perc_reliab = reliab * 100
+                perc_fail = (1 - reliab) * 100
 
-                fig_haz_g = go.Figure(go.Scatter(x=t_g, y=hazard_rate_g, mode='lines', line=dict(color='orange')))
-                fig_haz_g.update_layout(title=f"Curva da Banheira: Taxa de Falha h(t) - {melhor_dist['nome']}", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
-                st.plotly_chart(fig_haz_g, use_container_width=True)
+                tab_h, tab_prob = st.tabs(["Taxa de Falha h(t)", "Curvas de Probabilidade e Confiabilidade"])
+                
+                with tab_h:
+                    fig_haz_g = go.Figure(go.Scatter(x=t_g, y=hazard_rate_g, mode='lines', line=dict(color='orange')))
+                    fig_haz_g.update_layout(title=f"Curva da Banheira: Taxa de Falha h(t) - {melhor_dist['nome']}", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
+                    st.plotly_chart(fig_haz_g, use_container_width=True)
+                
+                with tab_prob:
+                    fig_prob = go.Figure()
+                    fig_prob.add_trace(go.Scatter(x=t_g, y=perc_reliab, mode='lines', name='Confiabilidade R(t)', line=dict(color='blue')))
+                    fig_prob.add_trace(go.Scatter(x=t_g, y=perc_fail, mode='lines', name='Prob. Falha F(t)', line=dict(color='red')))
+                    fig_prob.update_layout(title=f"R(t) e F(t) - {melhor_dist['nome']}", xaxis_title="Horas Operacionais", yaxis_title="Porcentagem (%)")
+                    st.plotly_chart(fig_prob, use_container_width=True)
 
             st.markdown("---")
             st.markdown("### 📈 RGA - Reliability Growth Analysis (Modelo Crow-AMSAA)")
             
-            # Prepara os dados para o RGA
             df_rga = corretivas.sort_values(by='DATA INÍCIO').dropna(subset=['DATA INÍCIO'])
             if len(df_rga) > 3:
                 data_inicial = df_rga['DATA INÍCIO'].min()
                 df_rga['Tempo_Acumulado_Horas'] = (df_rga['DATA INÍCIO'] - data_inicial).dt.total_seconds() / 3600
-                df_rga = df_rga[df_rga['Tempo_Acumulado_Horas'] > 0] # Remove t=0 para evitar log(0)
+                df_rga = df_rga[df_rga['Tempo_Acumulado_Horas'] > 0]
                 df_rga['Falhas_Acumuladas'] = np.arange(1, len(df_rga) + 1)
                 
                 if len(df_rga) > 2:
-                    # Ajuste linear do log(t) vs log(N(t))
                     x_log = np.log(df_rga['Tempo_Acumulado_Horas'])
                     y_log = np.log(df_rga['Falhas_Acumuladas'])
                     beta_rga, log_lambda_rga = np.polyfit(x_log, y_log, 1)
@@ -816,33 +832,64 @@ with aba_lda:
 
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante")
-                component_mttf = calcular_mttf_componentes(df_comp)
+                
+                # Resgatando dicionário atualizado com MTTF e Probabilidade
+                component_metrics = calcular_metricas_componentes(df_comp)
+                
                 df_ativos = df_comp[(df_comp['Status_LDA'] == 0) & (df_comp['Horas_LDA'] > 0)].copy()
-                df_ativos['MTTF'] = df_ativos['COMPONENTE'].map(component_mttf)
+                df_ativos['MTTF'] = df_ativos['COMPONENTE'].map(lambda c: component_metrics.get(c, {}).get('MTTF', np.nan))
+                df_ativos['Prob_MTTF'] = df_ativos['COMPONENTE'].map(lambda c: component_metrics.get(c, {}).get('Prob_MTTF', np.nan))
                 df_ativos = df_ativos.dropna(subset=['MTTF'])
 
-                if not df_ativos.empty and 'TAG' in df_ativos.columns and 'DATA' in df_ativos.columns:
+                if not df_ativos.empty:
                     df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
-                    df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
+                    if 'TAG' in df_ativos.columns:
+                        df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
+                    else:
+                        df_ativos['EQUIP'] = 'Geral'
+                        
+                    # Prepara Texto do Hover de acordo com as colunas disponíveis
+                    if 'DATA' in df_ativos.columns:
+                        df_ativos['Hover_Text'] = df_ativos.apply(
+                            lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
+                                        f"<b>Componente:</b> {row['COMPONENTE']}<br>"
+                                        f"<b>Condição:</b> {row.get('SITUAÇÃO DO COMPONENTE', '')}<br>"
+                                        f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
+                                        f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
+                                        f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h<br>"
+                                        f"<b>Data de Leitura:</b> {format_date_safe(row.get('DATA', 'N/A'))}", axis=1
+                        )
+                    else:
+                        df_ativos['Hover_Text'] = df_ativos.apply(
+                            lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
+                                        f"<b>Componente:</b> {row['COMPONENTE']}<br>"
+                                        f"<b>Condição:</b> {row.get('SITUAÇÃO DO COMPONENTE', '')}<br>"
+                                        f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
+                                        f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
+                                        f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h", axis=1
+                        )
                     
-                    df_ativos['Hover_Text'] = df_ativos.apply(
-                        lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
-                                    f"<b>Componente:</b> {row['COMPONENTE']}<br>"
-                                    f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
-                                    f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
-                                    f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h<br>"
-                                    f"<b>Data de Leitura:</b> {format_date_safe(row.get('DATA', 'N/A'))}", axis=1
-                    )
-                    
-                    col_f1, col_f2 = st.columns(2)
+                    # 3 FILTROS: %, COMPONENTES E SITUAÇÃO
+                    col_f1, col_f2, col_f3 = st.columns(3)
                     with col_f1:
                         max_vida = float(df_ativos['Vida_Consumida_%'].max()) if not df_ativos.empty else 100.0
-                        faixa_vida = st.slider("Filtro %:", min_value=0.0, max_value=max(200.0, max_vida), value=(0.0, max(100.0, max_vida)))
+                        faixa_vida = st.slider("Filtro % de Vida:", min_value=0.0, max_value=max(200.0, max_vida), value=(0.0, max(100.0, max_vida)))
+                    
                     with col_f2:
                         comps_heatmap = df_ativos['COMPONENTE'].unique().tolist()
                         selecao_comps = st.multiselect("Componentes:", comps_heatmap, default=comps_heatmap)
+                        
+                    with col_f3:
+                        situacoes_disp = df_ativos['SITUAÇÃO DO COMPONENTE'].dropna().unique().tolist()
+                        selecao_situacao = st.multiselect("Situação do Componente:", situacoes_disp, default=situacoes_disp)
 
-                    df_heat_filtered = df_ativos[(df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) & (df_ativos['COMPONENTE'].isin(selecao_comps))]
+                    # Aplicando os filtros todos de uma vez
+                    df_heat_filtered = df_ativos[
+                        (df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & 
+                        (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) & 
+                        (df_ativos['COMPONENTE'].isin(selecao_comps)) &
+                        (df_ativos['SITUAÇÃO DO COMPONENTE'].isin(selecao_situacao))
+                    ]
 
                     if not df_heat_filtered.empty:
                         heatmap_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
@@ -861,53 +908,16 @@ with aba_lda:
                         fig_heat.update_layout(title="Porcentagem (%) do MTTF Consumida", xaxis_title="COMPONENTE", yaxis_title="EQUIP")
                         st.plotly_chart(fig_heat, use_container_width=True)
                         
-                        df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
+                        # Criando o Dataframe do MTTF com a nova métrica de probabilidade
+                        df_mttf_display = pd.DataFrame.from_dict(component_metrics, orient='index').reset_index()
+                        df_mttf_display.columns = ['Componente', 'MTTF (Horas)', 'Probabilidade Falha no MTTF (%)']
                         df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
-                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
-                        st.dataframe(df_mttf_display, use_container_width=True)
-                
-                elif not df_ativos.empty and 'TAG' in df_ativos.columns:
-                    df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
-                    df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
-                    
-                    df_ativos['Hover_Text'] = df_ativos.apply(
-                        lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
-                                    f"<b>Componente:</b> {row['COMPONENTE']}<br>"
-                                    f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
-                                    f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
-                                    f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h", axis=1
-                    )
-                    
-                    col_f1, col_f2 = st.columns(2)
-                    with col_f1:
-                        max_vida = float(df_ativos['Vida_Consumida_%'].max()) if not df_ativos.empty else 100.0
-                        faixa_vida = st.slider("Filtro %:", min_value=0.0, max_value=max(200.0, max_vida), value=(0.0, max(100.0, max_vida)))
-                    with col_f2:
-                        comps_heatmap = df_ativos['COMPONENTE'].unique().tolist()
-                        selecao_comps = st.multiselect("Componentes:", comps_heatmap, default=comps_heatmap)
-
-                    df_heat_filtered = df_ativos[(df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) & (df_ativos['COMPONENTE'].isin(selecao_comps))]
-
-                    if not df_heat_filtered.empty:
-                        heatmap_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
-                        hover_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Hover_Text', aggfunc='first').fillna("")
                         
-                        fig_heat = go.Figure(data=go.Heatmap(
-                            z=heatmap_data.values,
-                            x=heatmap_data.columns,
-                            y=heatmap_data.index,
-                            text=heatmap_data.values.round(1),
-                            texttemplate="%{text}",
-                            customdata=hover_data.values,
-                            hovertemplate="%{customdata}<extra></extra>",
-                            colorscale="RdYlGn_r"
-                        ))
-                        fig_heat.update_layout(title="Porcentagem (%) do MTTF Consumida", xaxis_title="COMPONENTE", yaxis_title="EQUIP")
-                        st.plotly_chart(fig_heat, use_container_width=True)
-                        
-                        df_mttf_display = pd.DataFrame(list(component_mttf.items()), columns=['Componente', 'MTTF (Horas)'])
-                        df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
                         df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
+                        df_mttf_display['Probabilidade Falha no MTTF (%)'] = df_mttf_display['Probabilidade Falha no MTTF (%)'].round(2)
+                        
                         st.dataframe(df_mttf_display, use_container_width=True)
+                    else:
+                        st.warning("Nenhum componente ativo encontrado para os filtros selecionados.")
             else:
-                st.error("Colunas obrigatórias ausentes.")
+                st.error("Colunas obrigatórias ausentes (SITUAÇÃO DO COMPONENTE, HORAS TRABALHADAS DO COMPONENTE).")
