@@ -69,7 +69,7 @@ def remove_accents(input_str):
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def get_pdf_lines(pdf, text, width):
-    if pd.isna(text) or str(text).strip() == "" or str(text) in ["nan", "None", "<NA>"]:
+    if pd.isna(text) or str(text).strip() == "" or str(text in ["nan", "None", "<NA>"]):
         return 1
     text = str(text)
     lines = 0
@@ -136,6 +136,7 @@ with aba_dashboard:
         st.markdown("---")
         st.markdown("### 📊 Indicadores Principais")
         
+        # Cálculos de KPI base
         corretivas = df_filtered[df_filtered['TIPO'] == 'CORRETIVA']
         num_falhas = len(corretivas)
         total_downtime = corretivas['TOTAL HORAS DECIMAIS'].sum()
@@ -152,12 +153,28 @@ with aba_dashboard:
         perc_prev = tipos_count_global.get('PREVENTIVA', 0)
         perc_corr = tipos_count_global.get('CORRETIVA', 0)
 
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("MTBF Global (Horas)", f"{mtbf:.2f}")
-        col2.metric("MTTR Global (Horas)", f"{mttr:.2f}")
-        col3.metric("Disponibilidade (Ai)", f"{disp_inerente:.1f}%")
-        col4.metric("% Prev. (Global Frota)", f"{perc_prev:.1f}%")
-        col5.metric("% Corr. (Global Frota)", f"{perc_corr:.1f}%")
+        # Cálculo MTBS Pós-PM (Filtra eventos em sequência: Preventiva -> Corretiva)
+        df_sorted = df_filtered.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
+        df_sorted['Is_PM'] = (df_sorted['TIPO'] == 'PREVENTIVA').astype(int)
+        df_sorted['PM_Group'] = df_sorted.groupby('EQUIPAMENTO')['Is_PM'].cumsum()
+
+        df_valid_groups = df_sorted[df_sorted['PM_Group'] > 0]
+        pms = df_valid_groups[df_valid_groups['TIPO'] == 'PREVENTIVA'].groupby(['EQUIPAMENTO', 'PM_Group'])['DATA FIM'].max().reset_index(name='PM_Fim')
+        corrs = df_valid_groups[df_valid_groups['TIPO'] == 'CORRETIVA'].groupby(['EQUIPAMENTO', 'PM_Group'])['DATA INÍCIO'].min().reset_index(name='Corr_Inicio')
+
+        mtbs_df = pd.merge(pms, corrs, on=['EQUIPAMENTO', 'PM_Group'])
+        mtbs_df['MTBS_Pos_PM'] = (mtbs_df['Corr_Inicio'] - mtbs_df['PM_Fim']).dt.total_seconds() / 3600
+        mtbs_df = mtbs_df[mtbs_df['MTBS_Pos_PM'] > 0]
+        mtbs_pos_pm_global = mtbs_df['MTBS_Pos_PM'].mean() if not mtbs_df.empty else 0
+
+        # Layout com 6 colunas para os KPIs
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        col1.metric("MTBF Global (h)", f"{mtbf:.2f}")
+        col2.metric("MTTR Global (h)", f"{mttr:.2f}")
+        col3.metric("MTBS Pós-PM (h)", f"{mtbs_pos_pm_global:.2f}")
+        col4.metric("Disponibilidade", f"{disp_inerente:.1f}%")
+        col5.metric("% Preventiva", f"{perc_prev:.1f}%")
+        col6.metric("% Corretiva", f"{perc_corr:.1f}%")
 
         st.markdown("---")
         col_evol, col_resp = st.columns([2, 1])
@@ -251,13 +268,12 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
-        # --- NOVA SEÇÃO: MODOS DE FALHA REPETITIVOS ---
+        # --- SEÇÃO: MODOS DE FALHA REPETITIVOS ---
         st.markdown("---")
         st.markdown("### 🔄 Modos de Falha Repetitivos por Equipamento")
         st.info("Identifica qual sistema/defeito está quebrando repetidas vezes no mesmo equipamento, evidenciando problemas crônicos.")
         
         if not corretivas.empty:
-            # Opções prováveis de modo de falha nas planilhas comuns
             colunas_provaveis_falha = [c for c in corretivas.columns if c.upper() in ['SUBGRUPO', 'SINTOMA', 'CAUSA', 'COMPONENTE', 'SISTEMA', 'DEFEITO']]
             default_modo = colunas_provaveis_falha[0] if colunas_provaveis_falha else corretivas.columns[0]
             
@@ -269,7 +285,6 @@ with aba_dashboard:
                     Downtime=('TOTAL HORAS DECIMAIS', 'sum')
                 ).reset_index()
                 
-                # Filtra apenas os modos de falha que se repetiram > 1 vez no mesmo equipamento
                 df_repetidas = df_repetidas[df_repetidas['Qtd_Falhas'] > 1].sort_values('Qtd_Falhas', ascending=False)
                 
                 if not df_repetidas.empty:
@@ -301,6 +316,44 @@ with aba_dashboard:
                         st.plotly_chart(fig_bad, use_container_width=True)
                 else:
                     st.success(f"🎉 Nenhum {col_modo} apresentou falhas repetidas no mesmo equipamento no período filtrado!")
+
+        # --- SEÇÃO: QUALIDADE DA MANUTENÇÃO (MTBS PÓS-PM) ---
+        st.markdown("---")
+        st.markdown("### ⚠️ Qualidade da Manutenção (MTBS Pós-Preventiva)")
+        st.info("**DIRETRIZ DA ENGENHARIA DE CONFIABILIDADE:** O indicador MTBS Após PM mede o tempo de operação do equipamento desde a saída da manutenção preventiva até a primeira parada não programada. Um MTBS Pós-PM inferior ao MTBS geral da frota comprova a presença de refeitos e defeitos induzidos por intervenção. O objetivo deste plano é padronizar a investigação sumária de anomalias e a aplicação do FMEA de Processo de Manutenção para eliminar definitivamente a reincidência de falhas infantis.")
+
+        col_mtbs1, col_mtbs2 = st.columns([1, 2])
+        with col_mtbs1:
+            if mtbs_pos_pm_global > 0:
+                diff_perc = ((mtbs_pos_pm_global - mtbf) / mtbf) * 100 if mtbf > 0 else 0
+                if mtbs_pos_pm_global < mtbf:
+                    st.error(f"🚨 **Alerta Crítico!** O MTBS Pós-Preventiva ({mtbs_pos_pm_global:.1f}h) está menor que o MTBF da frota ({mtbf:.1f}h). Isso indica falhas prematuras induzidas pela própria manutenção.")
+                else:
+                    st.success(f"✅ **Manutenção Saudável!** O MTBS Pós-Preventiva ({mtbs_pos_pm_global:.1f}h) é superior ao MTBF da frota ({mtbf:.1f}h). A rotina preventiva está estendendo a vida do ativo corretamente.")
+                
+                st.metric("Comparativo: MTBS Pós-PM vs MTBF", f"{mtbs_pos_pm_global:.1f}h", f"{diff_perc:.1f}% em relação ao MTBF")
+            else:
+                st.warning("Sem dados suficientes de Preventivas seguidas de Corretivas no período filtrado.")
+
+        with col_mtbs2:
+            if not mtbs_df.empty:
+                df_mtbs_equip = mtbs_df.groupby('EQUIPAMENTO')['MTBS_Pos_PM'].mean().reset_index().sort_values('MTBS_Pos_PM')
+                
+                # Exibe os 10 PIORES (menor tempo de MTBS significa quebra mais rápida após PM)
+                df_mtbs_worst = df_mtbs_equip.head(10)
+                
+                fig_mtbs = px.bar(
+                    df_mtbs_worst, 
+                    x='EQUIPAMENTO', 
+                    y='MTBS_Pos_PM', 
+                    text=df_mtbs_worst['MTBS_Pos_PM'].round(1),
+                    title="Top 10 Piores MTBS Pós-Preventiva (Alvos do FMEA de Processo)",
+                    color='MTBS_Pos_PM',
+                    color_continuous_scale='Reds_r' # Invertido: O mais baixo fica mais vermelho
+                )
+                fig_mtbs.update_traces(textposition='outside')
+                fig_mtbs.update_layout(yaxis_title="MTBS Pós-PM (Horas)")
+                st.plotly_chart(fig_mtbs, use_container_width=True)
 
     else:
         st.info("Faça o upload da Planilha de Ordens de Serviço (OS).")
