@@ -44,7 +44,7 @@ def carregar_dados_os(file):
     return df
 
 @st.cache_data
-def calcular_metricas_componentes(df_comp):
+def calcular_metricas_componentes(df_comp, alpha=0.05):
     component_metrics = {}
     if not LIFELINES_INSTALLED:
         return component_metrics
@@ -52,7 +52,7 @@ def calcular_metricas_componentes(df_comp):
         df_c = df_comp[(df_comp['COMPONENTE'] == comp) & (df_comp['Horas_LDA'] > 0)]
         if df_c['Status_LDA'].sum() > 0:
             try:
-                wf_heat = WeibullFitter()
+                wf_heat = WeibullFitter(alpha=alpha)
                 wf_heat.fit(df_c['Horas_LDA'], event_observed=df_c['Status_LDA'])
                 mttf = wf_heat.lambda_ * gamma(1 + (1/wf_heat.rho_))
                 # Cálculo da probabilidade de falha F(t) no ponto do MTTF
@@ -288,17 +288,17 @@ with aba_ia:
             # Weibull
             shape_w, loc_w, scale_w = st_scipy.weibull_min.fit(tbf_clean_global, floc=0)
             ll_w = np.sum(st_scipy.weibull_min.logpdf(tbf_clean_global, shape_w, loc=loc_w, scale=scale_w))
-            aic_w = 4 - 2 * ll_w # k=2 params
+            aic_w = 4 - 2 * ll_w
             
             # Exponencial
             loc_e, scale_e = st_scipy.expon.fit(tbf_clean_global, floc=0)
             ll_e = np.sum(st_scipy.expon.logpdf(tbf_clean_global, loc=loc_e, scale=scale_e))
-            aic_e = 2 - 2 * ll_e # k=1 param
+            aic_e = 2 - 2 * ll_e
             
             # Lognormal
             shape_l, loc_l, scale_l = st_scipy.lognorm.fit(tbf_clean_global, floc=0)
             ll_l = np.sum(st_scipy.lognorm.logpdf(tbf_clean_global, shape_l, loc=loc_l, scale=scale_l))
-            aic_l = 4 - 2 * ll_l # k=2 params
+            aic_l = 4 - 2 * ll_l
             
             resultados_dist = [
                 {'nome': 'Weibull', 'aic': aic_w, 'params': {'shape': shape_w, 'scale': scale_w}, 'obj': st_scipy.weibull_min},
@@ -309,7 +309,7 @@ with aba_ia:
             
             st.success(f"🏆 **Melhor Distribuição Ajustada:** {melhor_dist['nome']} (AIC: {melhor_dist['aic']:.1f})")
             
-            # Diagnóstico da Curva da Banheira (baseado no beta do Weibull)
+            # Diagnóstico da Curva da Banheira
             estagio = "Mortalidade Infantil (Falhas Prematuras)" if shape_w < 1 else "Falhas Aleatórias (Vida Útil Normal)" if 1 <= shape_w <= 1.5 else "Fase de Desgaste (Fim de Vida)"
             st.info(f"💡 **Diagnóstico da Frota (Baseado em Weibull $\\beta={shape_w:.3f}$):** {estagio}")
 
@@ -318,7 +318,6 @@ with aba_ia:
                 st.markdown("#### Probabilidade e Confiabilidade")
                 t_input = st.number_input("Insira o Tempo Operacional $t$ (Horas) para cálculo:", min_value=1.0, value=float(round(np.mean(tbf_clean_global))), step=10.0)
                 
-                # Cálculos R(t) e F(t) dinâmicos
                 if melhor_dist['nome'] == 'Weibull':
                     rt_val = st_scipy.weibull_min.sf(t_input, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale']) * 100
                     ft_val = 100 - rt_val
@@ -327,7 +326,7 @@ with aba_ia:
                     rt_val = st_scipy.expon.sf(t_input, loc=0, scale=melhor_dist['params']['scale']) * 100
                     ft_val = 100 - rt_val
                     st.write(f"**Parâmetros:** MTBF (Escala) = {melhor_dist['params']['scale']:.1f}h | $\\lambda$ = {1/melhor_dist['params']['scale']:.6f}")
-                else: # Lognormal
+                else:
                     rt_val = st_scipy.lognorm.sf(t_input, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale']) * 100
                     ft_val = 100 - rt_val
                     st.write(f"**Parâmetros:** $\\sigma$ (Forma) = {melhor_dist['params']['shape']:.3f} | $\\mu$ (Escala/exp) = {melhor_dist['params']['scale']:.1f}h")
@@ -336,7 +335,6 @@ with aba_ia:
                 st.metric("Probabilidade de Falha F(t)", f"{ft_val:.1f}%")
 
             with col_dist2:
-                # Geração de dados de plotagem para toda a curva de tempo
                 t_g = np.linspace(0.1, max(tbf_clean_global) * 1.2, 200)
                 if melhor_dist['nome'] == 'Weibull':
                     reliab = st_scipy.weibull_min.sf(t_g, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale'])
@@ -781,25 +779,48 @@ with aba_lda:
             
             if 'SITUAÇÃO DO COMPONENTE' in df_comp_raw.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp_raw.columns:
                 
-                st.info("O algoritmo classifica as falhas procurando por uma palavra-chave específica na coluna de Situação.")
-                palavra_falha = st.text_input("Qual palavra indica que o componente FALHOU? (O restante será tratado como preventivo/ativo)", value="falhou").lower()
+                # --- NOVOS FILTROS GLOBAIS DE CONDIÇÃO E CONFIANÇA ---
+                st.markdown("#### ⚙️ Configurações e Filtros Globais da Base")
+                col_cfg1, col_cfg2 = st.columns(2)
+                with col_cfg1:
+                    st.info("A classificação de falhas procura pela palavra-chave definida abaixo na coluna de Situação.")
+                    palavra_falha = st.text_input("Qual palavra indica que o componente FALHOU?", value="falhou").lower()
+                with col_cfg2:
+                    st.info("O Nível de Confiança ajusta as margens de erro (Limites Inferior e Superior) das análises estatísticas.")
+                    confianca_input = st.number_input("Nível de Confiança (%) - Curvas Kaplan-Meier/Weibull", min_value=1.0, max_value=99.9, value=95.0, step=1.0)
+                    alpha_lda = 1.0 - (confianca_input / 100.0)
 
-                if 'MODELO' in df_comp_raw.columns:
-                    modelos_disp = df_comp_raw['MODELO'].dropna().astype(str).unique().tolist()
-                    modelo_alvo = st.multiselect("Filtre pelo Modelo:", modelos_disp, default=modelos_disp)
-                    if modelo_alvo:
-                        df_comp = df_comp_raw[df_comp_raw['MODELO'].astype(str).isin(modelo_alvo)].copy()
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    if 'MODELO' in df_comp_raw.columns:
+                        modelos_disp = df_comp_raw['MODELO'].dropna().astype(str).unique().tolist()
+                        modelo_alvo = st.multiselect("Filtre pelo Modelo:", modelos_disp, default=modelos_disp)
                     else:
-                        df_comp = df_comp_raw.copy()
-                else:
-                    df_comp = df_comp_raw.copy()
+                        modelo_alvo = []
                 
-                # APLICANDO A PALAVRA DE FALHA DA INTERFACE:
+                with col_f2:
+                    # Busca automaticamente colunas com a palavra 'CONDIÇÃO' (ou deixa selecionar)
+                    cols_cond = [c for c in df_comp_raw.columns if 'CONDIÇÃO' in c.upper() or 'CONDICAO' in c.upper()]
+                    default_col = cols_cond[0] if cols_cond else df_comp_raw.columns[0]
+                    
+                    col_condicao = st.selectbox("Selecione a coluna de Condição (Original, Novo, Reman, etc.):", df_comp_raw.columns, index=df_comp_raw.columns.tolist().index(default_col))
+                    condicoes_disp = df_comp_raw[col_condicao].dropna().astype(str).unique().tolist()
+                    condicoes_sel = st.multiselect("Filtre pela Condição:", condicoes_disp, default=condicoes_disp)
+
+                # Aplicando os filtros globais ANTES de qualquer cálculo
+                df_comp = df_comp_raw.copy()
+                if modelo_alvo:
+                    df_comp = df_comp[df_comp['MODELO'].astype(str).isin(modelo_alvo)]
+                if condicoes_sel:
+                    df_comp = df_comp[df_comp[col_condicao].astype(str).isin(condicoes_sel)]
+                
                 df_comp['Status_LDA'] = df_comp['SITUAÇÃO DO COMPONENTE'].apply(lambda x: 1 if isinstance(x, str) and palavra_falha in x.lower() else 0)
                 df_comp['Horas_LDA'] = pd.to_numeric(df_comp['HORAS TRABALHADAS DO COMPONENTE'], errors='coerce')
                 
+                st.markdown("---")
+                
                 componentes_disp = df_comp['COMPONENTE'].dropna().unique().tolist()
-                comp_alvo = st.selectbox("Selecione o Componente:", componentes_disp)
+                comp_alvo = st.selectbox("Selecione o Componente Específico para Análise:", componentes_disp)
                 
                 df_alvo = df_comp[df_comp['COMPONENTE'] == comp_alvo].dropna(subset=['Horas_LDA'])
                 df_alvo = df_alvo[df_alvo['Horas_LDA'] > 0]
@@ -808,33 +829,45 @@ with aba_lda:
                     falhas_count = df_alvo['Status_LDA'].sum()
                     susp_count = len(df_alvo) - falhas_count
                     
-                    st.markdown("### 📋 Tabela Resumo")
-                    cols_exist = [c for c in ['MODELO', 'TAG', 'COMPONENTE', 'SITUAÇÃO DO COMPONENTE', 'Horas_LDA'] if c in df_alvo.columns]
+                    st.markdown("### 📋 Tabela Resumo da Base Filtrada")
+                    cols_exist = [c for c in ['MODELO', 'TAG', 'COMPONENTE', col_condicao, 'SITUAÇÃO DO COMPONENTE', 'Horas_LDA'] if c in df_alvo.columns]
                     st.dataframe(df_alvo[cols_exist].sort_values('Horas_LDA', ascending=False), use_container_width=True)
                     
                     if falhas_count > 0:
-                        wf = WeibullFitter()
+                        # Adicionando o Alpha (Confiança) no cálculo
+                        wf = WeibullFitter(alpha=alpha_lda)
                         wf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
-                        st.success(f"**Weibull:** $\\beta$ = {wf.rho_:.2f} | $\\eta$ = {wf.lambda_:.2f}h | **MTTF:** {wf.lambda_ * gamma(1 + (1/wf.rho_)):.2f}h")
+                        st.success(f"**Weibull (IC {confianca_input}%):** $\\beta$ = {wf.rho_:.2f} | $\\eta$ = {wf.lambda_:.2f}h | **MTTF:** {wf.lambda_ * gamma(1 + (1/wf.rho_)):.2f}h")
                         
-                        kmf = KaplanMeierFitter()
+                        kmf = KaplanMeierFitter(alpha=alpha_lda)
                         kmf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
                         t_lda = np.linspace(0.1, df_alvo['Horas_LDA'].max() * 1.2, 100)
                         
-                        tab_l1, tab_l2 = st.tabs(["Confiabilidade R(t)", "Taxa de Falha h(t)"])
+                        tab_l1, tab_l2 = st.tabs(["Confiabilidade R(t) com Intervalo de Confiança", "Taxa de Falha h(t)"])
                         with tab_l1:
                             fig_l1 = go.Figure()
-                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier'))
+                            
+                            # Renderização do preenchimento da área do Intervalo de Confiança (Kaplan-Meier)
+                            ci_lower = kmf.confidence_interval_.iloc[:, 0]
+                            ci_upper = kmf.confidence_interval_.iloc[:, 1]
+                            
+                            fig_l1.add_trace(go.Scatter(x=ci_lower.index, y=ci_lower, mode='lines', line=dict(color='rgba(255,255,255,0)'), showlegend=False))
+                            fig_l1.add_trace(go.Scatter(x=ci_upper.index, y=ci_upper, mode='lines', fill='tonexty', fillcolor='rgba(0, 0, 255, 0.15)', line=dict(color='rgba(255,255,255,0)'), name=f'IC {confianca_input}% (KM)'))
+                            
+                            # Linhas centrais
+                            fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier (Central)'))
                             fig_l1.add_trace(go.Scatter(x=t_lda, y=wf.survival_function_at_times(t_lda), mode='lines', line=dict(dash='dash', color='red'), name='Weibull'))
+                            fig_l1.update_layout(xaxis_title="Tempo (Horas)", yaxis_title="Probabilidade de Sobrevivência", hovermode="x unified")
                             st.plotly_chart(fig_l1, use_container_width=True)
+                            
                         with tab_l2:
                             st.plotly_chart(go.Figure(go.Scatter(x=t_lda, y=wf.hazard_at_times(t_lda), mode='lines', line=dict(color='purple'))), use_container_width=True)
 
                 st.markdown("---")
-                st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante")
+                st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante da Frota")
                 
-                # Resgatando dicionário atualizado com MTTF e Probabilidade
-                component_metrics = calcular_metricas_componentes(df_comp)
+                # Recalcula usando os filtros globais (já aplicados) e enviando o Alpha atualizado
+                component_metrics = calcular_metricas_componentes(df_comp, alpha=alpha_lda)
                 
                 df_ativos = df_comp[(df_comp['Status_LDA'] == 0) & (df_comp['Horas_LDA'] > 0)].copy()
                 df_ativos['MTTF'] = df_ativos['COMPONENTE'].map(lambda c: component_metrics.get(c, {}).get('MTTF', np.nan))
@@ -848,12 +881,11 @@ with aba_lda:
                     else:
                         df_ativos['EQUIP'] = 'Geral'
                         
-                    # Prepara Texto do Hover de acordo com as colunas disponíveis
                     if 'DATA' in df_ativos.columns:
                         df_ativos['Hover_Text'] = df_ativos.apply(
                             lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
                                         f"<b>Componente:</b> {row['COMPONENTE']}<br>"
-                                        f"<b>Condição:</b> {row.get('SITUAÇÃO DO COMPONENTE', '')}<br>"
+                                        f"<b>Condição Base:</b> {row.get(col_condicao, '')}<br>"
                                         f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
                                         f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
                                         f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h<br>"
@@ -863,27 +895,25 @@ with aba_lda:
                         df_ativos['Hover_Text'] = df_ativos.apply(
                             lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
                                         f"<b>Componente:</b> {row['COMPONENTE']}<br>"
-                                        f"<b>Condição:</b> {row.get('SITUAÇÃO DO COMPONENTE', '')}<br>"
+                                        f"<b>Condição Base:</b> {row.get(col_condicao, '')}<br>"
                                         f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
                                         f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
                                         f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h", axis=1
                         )
                     
-                    # 3 FILTROS: %, COMPONENTES E SITUAÇÃO
-                    col_f1, col_f2, col_f3 = st.columns(3)
-                    with col_f1:
+                    col_h1, col_h2, col_h3 = st.columns(3)
+                    with col_h1:
                         max_vida = float(df_ativos['Vida_Consumida_%'].max()) if not df_ativos.empty else 100.0
-                        faixa_vida = st.slider("Filtro % de Vida:", min_value=0.0, max_value=max(200.0, max_vida), value=(0.0, max(100.0, max_vida)))
+                        faixa_vida = st.slider("Filtro Visual - % de Vida Consumida:", min_value=0.0, max_value=max(200.0, max_vida), value=(0.0, max(100.0, max_vida)))
                     
-                    with col_f2:
+                    with col_h2:
                         comps_heatmap = df_ativos['COMPONENTE'].unique().tolist()
-                        selecao_comps = st.multiselect("Componentes:", comps_heatmap, default=comps_heatmap)
+                        selecao_comps = st.multiselect("Esconder Componentes Específicos:", comps_heatmap, default=comps_heatmap)
                         
-                    with col_f3:
+                    with col_h3:
                         situacoes_disp = df_ativos['SITUAÇÃO DO COMPONENTE'].dropna().unique().tolist()
-                        selecao_situacao = st.multiselect("Situação do Componente:", situacoes_disp, default=situacoes_disp)
+                        selecao_situacao = st.multiselect("Esconder Situações (ex: Preventivas):", situacoes_disp, default=situacoes_disp)
 
-                    # Aplicando os filtros todos de uma vez
                     df_heat_filtered = df_ativos[
                         (df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & 
                         (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) & 
@@ -908,12 +938,11 @@ with aba_lda:
                         fig_heat.update_layout(title="Porcentagem (%) do MTTF Consumida", xaxis_title="COMPONENTE", yaxis_title="EQUIP")
                         st.plotly_chart(fig_heat, use_container_width=True)
                         
-                        # Criando o Dataframe do MTTF com a nova métrica de probabilidade
                         df_mttf_display = pd.DataFrame.from_dict(component_metrics, orient='index').reset_index()
-                        df_mttf_display.columns = ['Componente', 'MTTF (Horas)', 'Probabilidade Falha no MTTF (%)']
-                        df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
+                        df_mttf_display.columns = ['Componente', 'MTTF Calculado (Horas)', 'Probabilidade Falha no MTTF (%)']
+                        df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF Calculado (Horas)')
                         
-                        df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
+                        df_mttf_display['MTTF Calculado (Horas)'] = df_mttf_display['MTTF Calculado (Horas)'].round(2)
                         df_mttf_display['Probabilidade Falha no MTTF (%)'] = df_mttf_display['Probabilidade Falha no MTTF (%)'].round(2)
                         
                         st.dataframe(df_mttf_display, use_container_width=True)
