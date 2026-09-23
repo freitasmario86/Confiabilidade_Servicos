@@ -167,7 +167,7 @@ with aba_dashboard:
             corretivas_evol = df_cascaded[df_cascaded['TIPO'] == 'CORRETIVA']
             if not corretivas_evol.empty:
                 corretivas_evol['Ano-Mês'] = corretivas_evol['DATA INÍCIO'].dt.strftime('%Y-%m')
-                evol_stats = corretivas_evol.groupby('Ano-Mês').agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
+                evol_stats = corretivas_evol.groupby('Ano-Mês').agg(Falhas=('EQUIPAMENTO', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
                 evol_stats['MTTR'] = evol_stats['Downtime'] / evol_stats['Falhas']
                 qtd_equip_evol = df_cascaded['EQUIPAMENTO'].nunique() if not df_cascaded.empty else 1
                 evol_stats['MTBF'] = ((730 * qtd_equip_evol) - evol_stats['Downtime']) / evol_stats['Falhas']
@@ -194,7 +194,7 @@ with aba_dashboard:
         dimensao = st.radio("Selecione a Dimensão de Análise:", ["EQUIPAMENTO", "GRUPO", "SUBGRUPO"], horizontal=True)
         
         if not corretivas.empty and dimensao in corretivas.columns:
-            dim_stats = corretivas.groupby(dimensao).agg(Falhas=('OS', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
+            dim_stats = corretivas.groupby(dimensao).agg(Falhas=('EQUIPAMENTO', 'count'), Downtime=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
             equip_count = df_filtered.groupby(dimensao)['EQUIPAMENTO'].nunique().reset_index(name='Qtd_Equip')
             dim_stats = pd.merge(dim_stats, equip_count, on=dimensao)
             dim_stats['MTTR'] = dim_stats['Downtime'] / dim_stats['Falhas']
@@ -252,6 +252,50 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
+        # --- NOVA SEÇÃO: FALHAS REPETIDAS (BAD ACTORS) ---
+        st.markdown("---")
+        st.markdown("### 🔄 Falhas Repetidas por Equipamento (Bad Actors)")
+        
+        if not corretivas.empty:
+            df_repetidas = corretivas.groupby('EQUIPAMENTO').agg(
+                Qtd_Falhas=('EQUIPAMENTO', 'count'), 
+                Downtime=('TOTAL HORAS DECIMAIS', 'sum')
+            ).reset_index()
+            
+            # Filtra apenas equipamentos que falharam mais de 1 vez e ordena
+            df_repetidas = df_repetidas[df_repetidas['Qtd_Falhas'] > 1].sort_values('Qtd_Falhas', ascending=False)
+            
+            if not df_repetidas.empty:
+                df_repetidas['MTBF (Horas)'] = ((dias_operacao * 24) - df_repetidas['Downtime']) / df_repetidas['Qtd_Falhas']
+                df_repetidas['MTBF (Horas)'] = df_repetidas['MTBF (Horas)'].apply(lambda x: max(x, 0)).round(2)
+                df_repetidas['Downtime (Horas)'] = df_repetidas['Downtime'].round(2)
+                
+                df_exibicao = df_repetidas[['EQUIPAMENTO', 'Qtd_Falhas', 'Downtime (Horas)', 'MTBF (Horas)']].head(15)
+                
+                col_bad1, col_bad2 = st.columns([1, 2])
+                with col_bad1:
+                    st.dataframe(
+                        df_exibicao.rename(columns={'Qtd_Falhas': 'Nº de Falhas'}),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                with col_bad2:
+                    fig_bad = px.bar(
+                        df_exibicao, 
+                        x='EQUIPAMENTO', 
+                        y='Qtd_Falhas', 
+                        text='Qtd_Falhas',
+                        hover_data=['Downtime (Horas)', 'MTBF (Horas)'],
+                        title="Top 15 Equipamentos com Falhas Repetidas",
+                        color='Qtd_Falhas',
+                        color_continuous_scale='Reds'
+                    )
+                    fig_bad.update_traces(textposition='outside')
+                    fig_bad.update_layout(yaxis_title="Número de Falhas")
+                    st.plotly_chart(fig_bad, use_container_width=True)
+            else:
+                st.success("🎉 Nenhum equipamento apresentou falhas repetidas no período filtrado!")
+
     else:
         st.info("Faça o upload da Planilha de Ordens de Serviço (OS).")
 
@@ -264,7 +308,7 @@ with aba_ia:
         
         st.markdown("### 🎯 Matriz de Criticidade (FMECA)")
         fmeca_dim = st.selectbox("Analisar Criticidade por:", ["EQUIPAMENTO", "GRUPO", "SUBGRUPO"], key='fmeca')
-        df_fmeca = corretivas.groupby(fmeca_dim).agg(Falhas=('OS', 'count'), Severidade=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
+        df_fmeca = corretivas.groupby(fmeca_dim).agg(Falhas=('EQUIPAMENTO', 'count'), Severidade=('TOTAL HORAS DECIMAIS', 'sum')).reset_index()
         df_fmeca['Risco (NPR)'] = df_fmeca['Falhas'] * df_fmeca['Severidade']
         df_fmeca = df_fmeca.sort_values('Risco (NPR)', ascending=False)
         df_fmeca['% Acumulada'] = df_fmeca['Risco (NPR)'].cumsum() / df_fmeca['Risco (NPR)'].sum() * 100
