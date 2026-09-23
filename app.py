@@ -272,26 +272,126 @@ with aba_ia:
         st.plotly_chart(fig_fmeca, use_container_width=True)
 
         st.markdown("---")
-        st.markdown("### 🛁 Curva da Banheira (Diagnóstico de Frota)")
+        st.markdown("### 🛁 Curva da Banheira (Diagnóstico de Frota) e Distribuições")
         tbf_data_global = corretivas.sort_values(by=['EQUIPAMENTO', 'DATA INÍCIO'])
         tbf_data_global['TBF'] = tbf_data_global.groupby('EQUIPAMENTO')['DATA INÍCIO'].diff().dt.total_seconds() / 3600
         tbf_clean_global = tbf_data_global['TBF'].dropna()
         tbf_clean_global = tbf_clean_global[tbf_clean_global > 0].values
 
         if len(tbf_clean_global) > 3:
-            shape_g, loc_g, scale_g = st_scipy.weibull_min.fit(tbf_clean_global, floc=0)
-            beta_g = shape_g
-            estagio = "Mortalidade Infantil (Falhas Prematuras)" if beta_g < 1 else "Falhas Aleatórias (Vida Útil Normal)" if 1 <= beta_g <= 1.5 else "Fase de Desgaste (Fim de Vida)"
-            st.success(f"**Parâmetro de Forma ($\\beta$):** {beta_g:.3f} ➔ **Diagnóstico:** {estagio}")
+            # 1. Encontrar a melhor distribuição (Weibull, Exponencial, Lognormal) via AIC
+            # Weibull
+            shape_w, loc_w, scale_w = st_scipy.weibull_min.fit(tbf_clean_global, floc=0)
+            ll_w = np.sum(st_scipy.weibull_min.logpdf(tbf_clean_global, shape_w, loc=loc_w, scale=scale_w))
+            aic_w = 4 - 2 * ll_w # k=2 params
+            
+            # Exponencial
+            loc_e, scale_e = st_scipy.expon.fit(tbf_clean_global, floc=0)
+            ll_e = np.sum(st_scipy.expon.logpdf(tbf_clean_global, loc=loc_e, scale=scale_e))
+            aic_e = 2 - 2 * ll_e # k=1 param
+            
+            # Lognormal
+            shape_l, loc_l, scale_l = st_scipy.lognorm.fit(tbf_clean_global, floc=0)
+            ll_l = np.sum(st_scipy.lognorm.logpdf(tbf_clean_global, shape_l, loc=loc_l, scale=scale_l))
+            aic_l = 4 - 2 * ll_l # k=2 params
+            
+            resultados_dist = [
+                {'nome': 'Weibull', 'aic': aic_w, 'params': {'shape': shape_w, 'scale': scale_w}, 'obj': st_scipy.weibull_min},
+                {'nome': 'Exponencial', 'aic': aic_e, 'params': {'scale': scale_e}, 'obj': st_scipy.expon},
+                {'nome': 'Lognormal', 'aic': aic_l, 'params': {'shape': shape_l, 'scale': scale_l}, 'obj': st_scipy.lognorm}
+            ]
+            melhor_dist = min(resultados_dist, key=lambda x: x['aic'])
+            
+            st.success(f"🏆 **Melhor Distribuição Ajustada:** {melhor_dist['nome']} (AIC: {melhor_dist['aic']:.1f})")
+            
+            # Diagnóstico da Curva da Banheira (sempre baseado no beta do Weibull como regra de ouro da engenharia)
+            estagio = "Mortalidade Infantil (Falhas Prematuras)" if shape_w < 1 else "Falhas Aleatórias (Vida Útil Normal)" if 1 <= shape_w <= 1.5 else "Fase de Desgaste (Fim de Vida)"
+            st.info(f"💡 **Diagnóstico da Frota (Baseado em Weibull $\\beta={shape_w:.3f}$):** {estagio}")
 
-            t_g = np.linspace(0.1, max(tbf_clean_global) * 1.2, 200)
-            reliability_g = st_scipy.weibull_min.sf(t_g, shape_g, loc=0, scale=scale_g)
-            hazard_rate_g = st_scipy.weibull_min.pdf(t_g, shape_g, loc=0, scale=scale_g) / reliability_g
-            hazard_rate_g[np.isinf(hazard_rate_g)] = 0
+            col_dist1, col_dist2 = st.columns(2)
+            with col_dist1:
+                st.markdown("#### Probabilidade e Confiabilidade")
+                t_input = st.number_input("Insira o Tempo Operacional $t$ (Horas) para cálculo:", min_value=1.0, value=float(round(np.mean(tbf_clean_global))), step=10.0)
+                
+                # Cálculos R(t) e F(t) dinâmicos de acordo com a melhor distribuição
+                if melhor_dist['nome'] == 'Weibull':
+                    rt_val = st_scipy.weibull_min.sf(t_input, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale']) * 100
+                    ft_val = 100 - rt_val
+                    st.write(f"**Parâmetros:** $\\beta$ (Forma) = {melhor_dist['params']['shape']:.3f} | $\\eta$ (Escala) = {melhor_dist['params']['scale']:.1f}h")
+                elif melhor_dist['nome'] == 'Exponencial':
+                    rt_val = st_scipy.expon.sf(t_input, loc=0, scale=melhor_dist['params']['scale']) * 100
+                    ft_val = 100 - rt_val
+                    st.write(f"**Parâmetros:** MTBF (Escala) = {melhor_dist['params']['scale']:.1f}h | $\\lambda$ = {1/melhor_dist['params']['scale']:.6f}")
+                else: # Lognormal
+                    rt_val = st_scipy.lognorm.sf(t_input, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale']) * 100
+                    ft_val = 100 - rt_val
+                    st.write(f"**Parâmetros:** $\\sigma$ (Forma) = {melhor_dist['params']['shape']:.3f} | $\\mu$ (Escala/exp) = {melhor_dist['params']['scale']:.1f}h")
 
-            fig_haz_g = go.Figure(go.Scatter(x=t_g, y=hazard_rate_g, mode='lines', line=dict(color='orange')))
-            fig_haz_g.update_layout(title="Curva da Banheira: Taxa de Falha h(t)", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
-            st.plotly_chart(fig_haz_g, use_container_width=True)
+                st.metric("Confiabilidade R(t)", f"{rt_val:.1f}%")
+                st.metric("Probabilidade de Falha F(t)", f"{ft_val:.1f}%")
+
+            with col_dist2:
+                # Plotando a Taxa de Falha da Melhor Distribuição
+                t_g = np.linspace(0.1, max(tbf_clean_global) * 1.2, 200)
+                if melhor_dist['nome'] == 'Weibull':
+                    reliab = st_scipy.weibull_min.sf(t_g, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale'])
+                    pdf_vals = st_scipy.weibull_min.pdf(t_g, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale'])
+                elif melhor_dist['nome'] == 'Exponencial':
+                    reliab = st_scipy.expon.sf(t_g, loc=0, scale=melhor_dist['params']['scale'])
+                    pdf_vals = st_scipy.expon.pdf(t_g, loc=0, scale=melhor_dist['params']['scale'])
+                else:
+                    reliab = st_scipy.lognorm.sf(t_g, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale'])
+                    pdf_vals = st_scipy.lognorm.pdf(t_g, melhor_dist['params']['shape'], loc=0, scale=melhor_dist['params']['scale'])
+
+                hazard_rate_g = pdf_vals / reliab
+                hazard_rate_g[np.isinf(hazard_rate_g)] = 0
+
+                fig_haz_g = go.Figure(go.Scatter(x=t_g, y=hazard_rate_g, mode='lines', line=dict(color='orange')))
+                fig_haz_g.update_layout(title=f"Curva da Banheira: Taxa de Falha h(t) - {melhor_dist['nome']}", xaxis_title="Horas Operacionais", yaxis_title="h(t)")
+                st.plotly_chart(fig_haz_g, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("### 📈 RGA - Reliability Growth Analysis (Modelo Crow-AMSAA)")
+            
+            # Prepara os dados para o RGA
+            df_rga = corretivas.sort_values(by='DATA INÍCIO').dropna(subset=['DATA INÍCIO'])
+            if len(df_rga) > 3:
+                data_inicial = df_rga['DATA INÍCIO'].min()
+                df_rga['Tempo_Acumulado_Horas'] = (df_rga['DATA INÍCIO'] - data_inicial).dt.total_seconds() / 3600
+                df_rga = df_rga[df_rga['Tempo_Acumulado_Horas'] > 0] # Remove t=0 para evitar log(0)
+                df_rga['Falhas_Acumuladas'] = np.arange(1, len(df_rga) + 1)
+                
+                if len(df_rga) > 2:
+                    # Ajuste linear do log(t) vs log(N(t))
+                    x_log = np.log(df_rga['Tempo_Acumulado_Horas'])
+                    y_log = np.log(df_rga['Falhas_Acumuladas'])
+                    beta_rga, log_lambda_rga = np.polyfit(x_log, y_log, 1)
+                    lambda_rga = np.exp(log_lambda_rga)
+                    
+                    col_rga1, col_rga2 = st.columns([1, 2])
+                    
+                    with col_rga1:
+                        st.write(f"**Parâmetro de Crescimento ($\\beta$):** {beta_rga:.3f}")
+                        st.write(f"**Escala ($\\lambda$):** {lambda_rga:.4f}")
+                        if beta_rga < 1:
+                            st.success("✅ **Confiabilidade Crescente!** A taxa de falhas está diminuindo. Melhorias sendo efetivas.")
+                        elif beta_rga > 1.1:
+                            st.error("🚨 **Confiabilidade Degradando!** A taxa de falhas está aumentando. Revisar planos de manutenção.")
+                        else:
+                            st.info("⚖️ **Confiabilidade Estável.** Taxa de falhas constante (comportamento exponencial).")
+                            
+                    with col_rga2:
+                        fig_rga = go.Figure()
+                        fig_rga.add_trace(go.Scatter(x=df_rga['Tempo_Acumulado_Horas'], y=df_rga['Falhas_Acumuladas'], mode='markers', name='Dados Reais', marker=dict(color='black')))
+                        
+                        t_trend = np.linspace(min(df_rga['Tempo_Acumulado_Horas']), max(df_rga['Tempo_Acumulado_Horas']), 100)
+                        n_trend = lambda_rga * (t_trend ** beta_rga)
+                        fig_rga.add_trace(go.Scatter(x=t_trend, y=n_trend, mode='lines', name='Curva Crow-AMSAA', line=dict(dash='dash', color='red')))
+                        
+                        fig_rga.update_layout(title="Crescimento de Confiabilidade (Log-Log)", xaxis_title="Tempo Acumulado (Horas)", yaxis_title="Falhas Acumuladas N(t)", xaxis_type="log", yaxis_type="log")
+                        st.plotly_chart(fig_rga, use_container_width=True)
+            else:
+                st.warning("Falhas insuficientes para Análise RGA.")
         else:
             st.warning("Dados de TBF insuficientes.")
     else:
@@ -365,18 +465,15 @@ with aba_estrategia:
                 st.table(tabela_inspecao)
             
             with col_grafico:
-                # ABAS PARA SEPARAR A CDF LINEAR DO PROBABILITY PLOT (LOG)
                 tab_cdf, tab_log = st.tabs(["CDF Linear (F(t))", "Probability Plot (Log-Log)"])
                 
                 t_plot = np.linspace(0.1, max(tbf_clean_insp)*1.5, 300)
                 cdf_plot = st_scipy.weibull_min.cdf(t_plot, shape_i, scale=scale_i) * 100
                 
-                # Cálculo da CDF Empírica (Kaplan-Meier)
                 kmf_i = KaplanMeierFitter()
                 kmf_i.fit(tbf_clean_insp, event_observed=np.ones_like(tbf_clean_insp))
                 emp_f = (1 - kmf_i.survival_function_['KM_estimate']) * 100
 
-                # 1. Gráfico CDF Linear
                 with tab_cdf:
                     fig_cdf = go.Figure()
                     fig_cdf.add_trace(go.Scatter(x=t_plot, y=cdf_plot, mode='lines', name='CDF Teórica (Weibull)', line=dict(color='blue')))
@@ -390,19 +487,14 @@ with aba_estrategia:
                     fig_cdf.update_layout(title="Curva de Probabilidade Acumulada - F(t)", xaxis_title="Horas", yaxis_title="Fração de Falhas (%)", yaxis=dict(range=[0, max(20, (st_scipy.weibull_min.cdf(mtbf_i, shape_i, scale=scale_i)*100)+15)]))
                     st.plotly_chart(fig_cdf, use_container_width=True)
 
-                # 2. Gráfico Weibull Plot (Log-Log)
                 with tab_log:
-                    # Preparando dados para log
                     t_log = t_plot[t_plot > 0]
                     cdf_log = st_scipy.weibull_min.cdf(t_log, shape_i, scale=scale_i)
                     
-                    # Evitando valores zero para o eixo Log
                     cdf_log = np.where(cdf_log == 0, 1e-5, cdf_log)
                     cdf_log = np.where(cdf_log == 1, 0.9999, cdf_log)
                     
                     fig_log = go.Figure()
-                    # A transformação matemática padrão do Probability Plot de Weibull é ln(-ln(1-F(t))) vs ln(t)
-                    # Porém o Plotly possui nativamente o eixo Log
                     fig_log.add_trace(go.Scatter(x=t_log, y=cdf_log*100, mode='lines', name='Linha de Tendência', line=dict(color='blue')))
                     fig_log.add_trace(go.Scatter(x=emp_f.index, y=emp_f.values, mode='markers', name='Dados', marker=dict(color='black')))
                     
@@ -673,6 +765,9 @@ with aba_lda:
             
             if 'SITUAÇÃO DO COMPONENTE' in df_comp_raw.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp_raw.columns:
                 
+                st.info("O algoritmo classifica as falhas procurando por uma palavra-chave específica na coluna de Situação.")
+                palavra_falha = st.text_input("Qual palavra indica que o componente FALHOU? (O restante será tratado como preventivo/ativo)", value="falhou").lower()
+
                 if 'MODELO' in df_comp_raw.columns:
                     modelos_disp = df_comp_raw['MODELO'].dropna().astype(str).unique().tolist()
                     modelo_alvo = st.multiselect("Filtre pelo Modelo:", modelos_disp, default=modelos_disp)
@@ -683,7 +778,8 @@ with aba_lda:
                 else:
                     df_comp = df_comp_raw.copy()
                 
-                df_comp['Status_LDA'] = df_comp['SITUAÇÃO DO COMPONENTE'].apply(lambda x: 1 if isinstance(x, str) and 'falhou' in x.lower() else 0)
+                # APLICANDO A PALAVRA DE FALHA DA INTERFACE:
+                df_comp['Status_LDA'] = df_comp['SITUAÇÃO DO COMPONENTE'].apply(lambda x: 1 if isinstance(x, str) and palavra_falha in x.lower() else 0)
                 df_comp['Horas_LDA'] = pd.to_numeric(df_comp['HORAS TRABALHADAS DO COMPONENTE'], errors='coerce')
                 
                 componentes_disp = df_comp['COMPONENTE'].dropna().unique().tolist()
@@ -725,11 +821,10 @@ with aba_lda:
                 df_ativos['MTTF'] = df_ativos['COMPONENTE'].map(component_mttf)
                 df_ativos = df_ativos.dropna(subset=['MTTF'])
 
-                if not df_ativos.empty and 'TAG' in df_ativos.columns and 'DATA' in df_ativos.columns: # ASSUMINDO COLUNA DATA
+                if not df_ativos.empty and 'TAG' in df_ativos.columns and 'DATA' in df_ativos.columns:
                     df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
                     df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
                     
-                    # Criação de Texto Customizado para o Hover (Horímetro, % e Data)
                     df_ativos['Hover_Text'] = df_ativos.apply(
                         lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
                                     f"<b>Componente:</b> {row['COMPONENTE']}<br>"
@@ -750,7 +845,6 @@ with aba_lda:
                     df_heat_filtered = df_ativos[(df_ativos['Vida_Consumida_%'] >= faixa_vida[0]) & (df_ativos['Vida_Consumida_%'] <= faixa_vida[1]) & (df_ativos['COMPONENTE'].isin(selecao_comps))]
 
                     if not df_heat_filtered.empty:
-                        # Pivotando os dados para a Matriz
                         heatmap_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Vida_Consumida_%', aggfunc='mean').fillna(0)
                         hover_data = df_heat_filtered.pivot_table(index='EQUIP', columns='COMPONENTE', values='Hover_Text', aggfunc='first').fillna("")
                         
@@ -771,7 +865,7 @@ with aba_lda:
                         df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF (Horas)')
                         df_mttf_display['MTTF (Horas)'] = df_mttf_display['MTTF (Horas)'].round(2)
                         st.dataframe(df_mttf_display, use_container_width=True)
-                # SE NÃO TIVER COLUNA DATA, FAZ O HOVER PADRÃO COM HORÍMETRO
+                
                 elif not df_ativos.empty and 'TAG' in df_ativos.columns:
                     df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
                     df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
