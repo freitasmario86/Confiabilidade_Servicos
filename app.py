@@ -986,6 +986,9 @@ with aba_lda:
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante da Frota")
                 
+                st.markdown("#### ⏳ Parâmetros para Previsão de Falha")
+                utilizacao_diaria = st.number_input("Taxa de Utilização Diária Estimada (Horas/Dia)", min_value=1.0, max_value=24.0, value=12.0)
+                
                 component_metrics = calcular_metricas_componentes(df_comp, alpha=alpha_lda)
                 
                 df_ativos = df_comp[(df_comp['Status_LDA'] == 0) & (df_comp['Horas_LDA'] > 0)].copy()
@@ -995,30 +998,35 @@ with aba_lda:
 
                 if not df_ativos.empty:
                     df_ativos['Vida_Consumida_%'] = (df_ativos['Horas_LDA'] / df_ativos['MTTF']) * 100
+                    
+                    # Cálculo de Dias Restantes e Data Prevista
+                    df_ativos['Horas_Restantes'] = df_ativos['MTTF'] - df_ativos['Horas_LDA']
+                    df_ativos['Horas_Restantes'] = df_ativos['Horas_Restantes'].clip(lower=0)
+                    df_ativos['Dias_Restantes'] = np.ceil(df_ativos['Horas_Restantes'] / utilizacao_diaria)
+                    
+                    if 'DATA' in df_ativos.columns:
+                        datas_base = pd.to_datetime(df_ativos['DATA'], errors='coerce').fillna(pd.Timestamp.today())
+                    else:
+                        datas_base = pd.Timestamp.today()
+                        
+                    df_ativos['Data_Prevista_Falha'] = datas_base + pd.to_timedelta(df_ativos['Dias_Restantes'], unit='D')
+                    df_ativos['Data_Prevista_Str'] = df_ativos['Data_Prevista_Falha'].dt.strftime('%d/%m/%Y')
+
                     if 'TAG' in df_ativos.columns:
                         df_ativos['EQUIP'] = df_ativos['TAG'].astype(str).apply(lambda x: x.split(' ')[0])
                     else:
                         df_ativos['EQUIP'] = 'Geral'
                         
-                    if 'DATA' in df_ativos.columns:
-                        df_ativos['Hover_Text'] = df_ativos.apply(
-                            lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
-                                        f"<b>Componente:</b> {row['COMPONENTE']}<br>"
-                                        f"<b>Condição Base:</b> {row.get(col_condicao, '')}<br>"
-                                        f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
-                                        f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
-                                        f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h<br>"
-                                        f"<b>Data de Leitura:</b> {format_date_safe(row.get('DATA', 'N/A'))}", axis=1
-                        )
-                    else:
-                        df_ativos['Hover_Text'] = df_ativos.apply(
-                            lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
-                                        f"<b>Componente:</b> {row['COMPONENTE']}<br>"
-                                        f"<b>Condição Base:</b> {row.get(col_condicao, '')}<br>"
-                                        f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
-                                        f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
-                                        f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h", axis=1
-                        )
+                    df_ativos['Hover_Text'] = df_ativos.apply(
+                        lambda row: f"<b>Equipamento:</b> {row['EQUIP']}<br>"
+                                    f"<b>Componente:</b> {row['COMPONENTE']}<br>"
+                                    f"<b>Condição Base:</b> {row.get(col_condicao, '')}<br>"
+                                    f"<b>Vida Consumida:</b> {row['Vida_Consumida_%']:.1f}%<br>"
+                                    f"<b>Horímetro Atual:</b> {row['Horas_LDA']}h<br>"
+                                    f"<b>MTTF Estimado:</b> {row['MTTF']:.1f}h<br>"
+                                    f"<b>Dias Restantes:</b> {row['Dias_Restantes']:.0f} dias<br>"
+                                    f"<b>Previsão de Troca:</b> {row['Data_Prevista_Str']}", axis=1
+                    )
                     
                     col_h1, col_h2, col_h3 = st.columns(3)
                     with col_h1:
@@ -1057,14 +1065,18 @@ with aba_lda:
                         fig_heat.update_layout(title="Porcentagem (%) do MTTF Consumida", xaxis_title="COMPONENTE", yaxis_title="EQUIP")
                         st.plotly_chart(fig_heat, use_container_width=True)
                         
-                        df_mttf_display = pd.DataFrame.from_dict(component_metrics, orient='index').reset_index()
-                        df_mttf_display.columns = ['Componente', 'MTTF Calculado (Horas)', 'Probabilidade Falha no MTTF (%)']
-                        df_mttf_display = df_mttf_display[df_mttf_display['Componente'].isin(selecao_comps)].sort_values('MTTF Calculado (Horas)')
+                        st.markdown("### 📋 Tabela de Previsão de Trocas (Equipamento x Componente)")
                         
-                        df_mttf_display['MTTF Calculado (Horas)'] = df_mttf_display['MTTF Calculado (Horas)'].round(2)
-                        df_mttf_display['Probabilidade Falha no MTTF (%)'] = df_mttf_display['Probabilidade Falha no MTTF (%)'].round(2)
+                        df_previsao = df_heat_filtered[['EQUIP', 'COMPONENTE', 'Horas_LDA', 'MTTF', 'Vida_Consumida_%', 'Dias_Restantes', 'Data_Prevista_Str']].copy()
+                        df_previsao.columns = ['Equipamento', 'Componente', 'Horímetro Atual (h)', 'MTTF (h)', 'Vida Consumida (%)', 'Dias Restantes', 'Data Prevista da Falha']
                         
-                        st.dataframe(df_mttf_display, use_container_width=True)
+                        df_previsao['Horímetro Atual (h)'] = df_previsao['Horímetro Atual (h)'].round(1)
+                        df_previsao['MTTF (h)'] = df_previsao['MTTF (h)'].round(1)
+                        df_previsao['Vida Consumida (%)'] = df_previsao['Vida Consumida (%)'].round(1)
+                        
+                        df_previsao = df_previsao.sort_values(by='Vida Consumida (%)', ascending=False)
+                        st.dataframe(df_previsao, use_container_width=True, hide_index=True)
+
                     else:
                         st.warning("Nenhum componente ativo encontrado para os filtros selecionados.")
             else:
