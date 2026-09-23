@@ -55,7 +55,6 @@ def calcular_metricas_componentes(df_comp, alpha=0.05):
                 wf_heat = WeibullFitter(alpha=alpha)
                 wf_heat.fit(df_c['Horas_LDA'], event_observed=df_c['Status_LDA'])
                 mttf = wf_heat.lambda_ * gamma(1 + (1/wf_heat.rho_))
-                # Cálculo da probabilidade de falha F(t) no ponto do MTTF
                 prob_mttf = (1 - np.exp(- (mttf / wf_heat.lambda_) ** wf_heat.rho_)) * 100
                 component_metrics[comp] = {
                     'MTTF': mttf, 
@@ -252,49 +251,56 @@ with aba_dashboard:
         with tab_p2: st.plotly_chart(plot_pareto(corretivas, 'GRUPO', 'Top 18 - Grupos'), use_container_width=True)
         with tab_p3: st.plotly_chart(plot_pareto(corretivas, 'SUBGRUPO', 'Top 18 - Subgrupos'), use_container_width=True)
 
-        # --- NOVA SEÇÃO: FALHAS REPETIDAS (BAD ACTORS) ---
+        # --- NOVA SEÇÃO: MODOS DE FALHA REPETITIVOS ---
         st.markdown("---")
-        st.markdown("### 🔄 Falhas Repetidas por Equipamento (Bad Actors)")
+        st.markdown("### 🔄 Modos de Falha Repetitivos por Equipamento")
+        st.info("Identifica qual sistema/defeito está quebrando repetidas vezes no mesmo equipamento, evidenciando problemas crônicos.")
         
         if not corretivas.empty:
-            df_repetidas = corretivas.groupby('EQUIPAMENTO').agg(
-                Qtd_Falhas=('EQUIPAMENTO', 'count'), 
-                Downtime=('TOTAL HORAS DECIMAIS', 'sum')
-            ).reset_index()
+            # Opções prováveis de modo de falha nas planilhas comuns
+            colunas_provaveis_falha = [c for c in corretivas.columns if c.upper() in ['SUBGRUPO', 'SINTOMA', 'CAUSA', 'COMPONENTE', 'SISTEMA', 'DEFEITO']]
+            default_modo = colunas_provaveis_falha[0] if colunas_provaveis_falha else corretivas.columns[0]
             
-            # Filtra apenas equipamentos que falharam mais de 1 vez e ordena
-            df_repetidas = df_repetidas[df_repetidas['Qtd_Falhas'] > 1].sort_values('Qtd_Falhas', ascending=False)
+            col_modo = st.selectbox("Selecione a coluna que representa o Modo de Falha / Sistema:", corretivas.columns, index=corretivas.columns.tolist().index(default_modo))
             
-            if not df_repetidas.empty:
-                df_repetidas['MTBF (Horas)'] = ((dias_operacao * 24) - df_repetidas['Downtime']) / df_repetidas['Qtd_Falhas']
-                df_repetidas['MTBF (Horas)'] = df_repetidas['MTBF (Horas)'].apply(lambda x: max(x, 0)).round(2)
-                df_repetidas['Downtime (Horas)'] = df_repetidas['Downtime'].round(2)
+            if col_modo:
+                df_repetidas = corretivas.groupby(['EQUIPAMENTO', col_modo]).agg(
+                    Qtd_Falhas=(col_modo, 'count'), 
+                    Downtime=('TOTAL HORAS DECIMAIS', 'sum')
+                ).reset_index()
                 
-                df_exibicao = df_repetidas[['EQUIPAMENTO', 'Qtd_Falhas', 'Downtime (Horas)', 'MTBF (Horas)']].head(15)
+                # Filtra apenas os modos de falha que se repetiram > 1 vez no mesmo equipamento
+                df_repetidas = df_repetidas[df_repetidas['Qtd_Falhas'] > 1].sort_values('Qtd_Falhas', ascending=False)
                 
-                col_bad1, col_bad2 = st.columns([1, 2])
-                with col_bad1:
-                    st.dataframe(
-                        df_exibicao.rename(columns={'Qtd_Falhas': 'Nº de Falhas'}),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                with col_bad2:
-                    fig_bad = px.bar(
-                        df_exibicao, 
-                        x='EQUIPAMENTO', 
-                        y='Qtd_Falhas', 
-                        text='Qtd_Falhas',
-                        hover_data=['Downtime (Horas)', 'MTBF (Horas)'],
-                        title="Top 15 Equipamentos com Falhas Repetidas",
-                        color='Qtd_Falhas',
-                        color_continuous_scale='Reds'
-                    )
-                    fig_bad.update_traces(textposition='outside')
-                    fig_bad.update_layout(yaxis_title="Número de Falhas")
-                    st.plotly_chart(fig_bad, use_container_width=True)
-            else:
-                st.success("🎉 Nenhum equipamento apresentou falhas repetidas no período filtrado!")
+                if not df_repetidas.empty:
+                    df_repetidas['Modo_Eqp'] = df_repetidas['EQUIPAMENTO'].astype(str) + " - " + df_repetidas[col_modo].astype(str)
+                    df_repetidas['Downtime (Horas)'] = df_repetidas['Downtime'].round(2)
+                    
+                    df_exibicao = df_repetidas[['EQUIPAMENTO', col_modo, 'Qtd_Falhas', 'Downtime (Horas)', 'Modo_Eqp']].head(15)
+                    
+                    col_bad1, col_bad2 = st.columns([1, 2])
+                    with col_bad1:
+                        st.dataframe(
+                            df_exibicao[['EQUIPAMENTO', col_modo, 'Qtd_Falhas', 'Downtime (Horas)']].rename(columns={'Qtd_Falhas': 'Nº de Falhas'}),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    with col_bad2:
+                        fig_bad = px.bar(
+                            df_exibicao, 
+                            x='Modo_Eqp', 
+                            y='Qtd_Falhas', 
+                            text='Qtd_Falhas',
+                            hover_data=['Downtime (Horas)'],
+                            title=f"Top 15 Modos de Falha Repetitivos ({col_modo})",
+                            color='Qtd_Falhas',
+                            color_continuous_scale='Reds'
+                        )
+                        fig_bad.update_traces(textposition='outside')
+                        fig_bad.update_layout(xaxis_title="Equipamento - Modo de Falha", yaxis_title="Número de Falhas")
+                        st.plotly_chart(fig_bad, use_container_width=True)
+                else:
+                    st.success(f"🎉 Nenhum {col_modo} apresentou falhas repetidas no mesmo equipamento no período filtrado!")
 
     else:
         st.info("Faça o upload da Planilha de Ordens de Serviço (OS).")
@@ -328,7 +334,6 @@ with aba_ia:
         tbf_clean_global = tbf_clean_global[tbf_clean_global > 0].values
 
         if len(tbf_clean_global) > 3:
-            # 1. Encontrar a melhor distribuição (Weibull, Exponencial, Lognormal) via AIC
             # Weibull
             shape_w, loc_w, scale_w = st_scipy.weibull_min.fit(tbf_clean_global, floc=0)
             ll_w = np.sum(st_scipy.weibull_min.logpdf(tbf_clean_global, shape_w, loc=loc_w, scale=scale_w))
@@ -353,7 +358,6 @@ with aba_ia:
             
             st.success(f"🏆 **Melhor Distribuição Ajustada:** {melhor_dist['nome']} (AIC: {melhor_dist['aic']:.1f})")
             
-            # Diagnóstico da Curva da Banheira
             estagio = "Mortalidade Infantil (Falhas Prematuras)" if shape_w < 1 else "Falhas Aleatórias (Vida Útil Normal)" if 1 <= shape_w <= 1.5 else "Fase de Desgaste (Fim de Vida)"
             st.info(f"💡 **Diagnóstico da Frota (Baseado em Weibull $\\beta={shape_w:.3f}$):** {estagio}")
 
@@ -823,7 +827,6 @@ with aba_lda:
             
             if 'SITUAÇÃO DO COMPONENTE' in df_comp_raw.columns and 'HORAS TRABALHADAS DO COMPONENTE' in df_comp_raw.columns:
                 
-                # --- NOVOS FILTROS GLOBAIS DE CONDIÇÃO E CONFIANÇA ---
                 st.markdown("#### ⚙️ Configurações e Filtros Globais da Base")
                 col_cfg1, col_cfg2 = st.columns(2)
                 with col_cfg1:
@@ -843,7 +846,6 @@ with aba_lda:
                         modelo_alvo = []
                 
                 with col_f2:
-                    # Busca automaticamente colunas com a palavra 'CONDIÇÃO' (ou deixa selecionar)
                     cols_cond = [c for c in df_comp_raw.columns if 'CONDIÇÃO' in c.upper() or 'CONDICAO' in c.upper()]
                     default_col = cols_cond[0] if cols_cond else df_comp_raw.columns[0]
                     
@@ -851,7 +853,6 @@ with aba_lda:
                     condicoes_disp = df_comp_raw[col_condicao].dropna().astype(str).unique().tolist()
                     condicoes_sel = st.multiselect("Filtre pela Condição:", condicoes_disp, default=condicoes_disp)
 
-                # Aplicando os filtros globais ANTES de qualquer cálculo
                 df_comp = df_comp_raw.copy()
                 if modelo_alvo:
                     df_comp = df_comp[df_comp['MODELO'].astype(str).isin(modelo_alvo)]
@@ -878,7 +879,6 @@ with aba_lda:
                     st.dataframe(df_alvo[cols_exist].sort_values('Horas_LDA', ascending=False), use_container_width=True)
                     
                     if falhas_count > 0:
-                        # Adicionando o Alpha (Confiança) no cálculo
                         wf = WeibullFitter(alpha=alpha_lda)
                         wf.fit(df_alvo['Horas_LDA'], event_observed=df_alvo['Status_LDA'])
                         st.success(f"**Weibull (IC {confianca_input}%):** $\\beta$ = {wf.rho_:.2f} | $\\eta$ = {wf.lambda_:.2f}h | **MTTF:** {wf.lambda_ * gamma(1 + (1/wf.rho_)):.2f}h")
@@ -891,14 +891,12 @@ with aba_lda:
                         with tab_l1:
                             fig_l1 = go.Figure()
                             
-                            # Renderização do preenchimento da área do Intervalo de Confiança (Kaplan-Meier)
                             ci_lower = kmf.confidence_interval_.iloc[:, 0]
                             ci_upper = kmf.confidence_interval_.iloc[:, 1]
                             
                             fig_l1.add_trace(go.Scatter(x=ci_lower.index, y=ci_lower, mode='lines', line=dict(color='rgba(255,255,255,0)'), showlegend=False))
                             fig_l1.add_trace(go.Scatter(x=ci_upper.index, y=ci_upper, mode='lines', fill='tonexty', fillcolor='rgba(0, 0, 255, 0.15)', line=dict(color='rgba(255,255,255,0)'), name=f'IC {confianca_input}% (KM)'))
                             
-                            # Linhas centrais
                             fig_l1.add_trace(go.Scatter(x=kmf.survival_function_.index, y=kmf.survival_function_['KM_estimate'], mode='lines', line=dict(shape='hv', color='blue'), name='Kaplan-Meier (Central)'))
                             fig_l1.add_trace(go.Scatter(x=t_lda, y=wf.survival_function_at_times(t_lda), mode='lines', line=dict(dash='dash', color='red'), name='Weibull'))
                             fig_l1.update_layout(xaxis_title="Tempo (Horas)", yaxis_title="Probabilidade de Sobrevivência", hovermode="x unified")
@@ -910,7 +908,6 @@ with aba_lda:
                 st.markdown("---")
                 st.markdown("### 🔥 Mapa de Calor: Vida Útil Restante da Frota")
                 
-                # Recalcula usando os filtros globais (já aplicados) e enviando o Alpha atualizado
                 component_metrics = calcular_metricas_componentes(df_comp, alpha=alpha_lda)
                 
                 df_ativos = df_comp[(df_comp['Status_LDA'] == 0) & (df_comp['Horas_LDA'] > 0)].copy()
